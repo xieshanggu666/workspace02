@@ -53,14 +53,24 @@ export async function syncNow(): Promise<{ pushed: number; conflicts: number; pu
   }
 
   useStore.getState().shiftOutbox([...acceptedIds]);
-  useStore.getState().setConflicts(pushResult.conflicts);
 
   state.setSyncState('pulling', '正在拉取远端更新…');
   const pull = await api.pull(useStore.getState().cursor ?? undefined);
 
-  // 冲突里服务端胜出的版本直接落库
-  for (const c of pushResult.conflicts) {
-    upsertConflictServerVersion(c);
+  // 重要：冲突记录【不】在此用服务端版本覆盖本地表。
+  // outbox 里的本地编辑仍在，applyPull 会保护这些 id；
+  // 本地版本原样保留，由用户在冲突卡片上选择：
+  //   - 采用服务端 → resolveConflict(..., 'server') 才写入服务端版本；
+  //   - 保留本机   → 以服务端版本为基线强制重推。
+  // 未决冲突跨同步轮次累积（按 entityType+id 去重），并已持久化，重启不丢。
+  if (pushResult.conflicts.length > 0) {
+    const store = useStore.getState();
+    const known = new Set(store.conflicts.map((c) => `${c.entityType}:${c.id}`));
+    const merged = [
+      ...store.conflicts,
+      ...pushResult.conflicts.filter((c) => !known.has(`${c.entityType}:${c.id}`)),
+    ];
+    store.setConflicts(merged);
   }
 
   let pulledCount = 0;
@@ -76,8 +86,10 @@ export async function syncNow(): Promise<{ pushed: number; conflicts: number; pu
 
 /**
  * 冲突裁决：
- *  - 'server'：丢弃本地改动（默认，applyPull 已落库；这里把残留的本地 outbox 清掉）
- *  - 'client'：以本地版本强制覆盖 —— 把 baseVersion 抬到冲突中服务端版本再推一次
+ *  - 'server'：丢弃本地改动，写入服务端胜出版本（服务端已删则删除本地记录），
+ *    并移除该记录在 outbox 中的待推送项；
+ *  - 'client'：以本地版本强制覆盖 —— 以服务端当前版本为基线重推，
+ *    成功后本地表版本跟到 server.version + 1。
  */
 export async function resolveConflict(
   conflict: SyncConflict<any>,
@@ -85,34 +97,44 @@ export async function resolveConflict(
 ): Promise<void> {
   const store = useStore.getState();
   const bucket = conflict.entityType as OutboxEntry['bucket'];
-
-  if (winner === 'server') {
-    store.applyServerEntity(bucket as any, conflict.server);
-    store.shiftOutbox([conflict.id]);
-  } else {
-    const entry = store.outbox.find((o) => o.bucket === bucket && o.entity.id === conflict.id);
-    const entity = { ...(entry?.entity ?? conflict.client), version: conflict.server.version };
-    const deviceId = await getDeviceId();
-    const res = await api.push({
-      deviceId,
-      [bucket]: [{ entity, baseVersion: conflict.server.version }],
-    } as SyncPushPayload);
-    if (res.accepted.includes(conflict.id)) {
-      store.shiftOutbox([conflict.id]);
-      store.applyServerEntity(bucket as any, entity);
-    } else {
-      store.setConflicts(res.conflicts);
-      throw new Error('强制覆盖仍被拒绝（对方又产生了新版本），请刷新后重试');
-    }
+  const knownBuckets: OutboxEntry['bucket'][] = [
+    'speakers', 'audio', 'courses', 'courseItems', 'attempts', 'annotations',
+  ];
+  if (!knownBuckets.includes(bucket)) {
+    store.clearConflict(conflict.entityType, conflict.id);
+    return;
   }
 
-  // 从冲突列表移除
-  useStore.setState({ conflicts: useStore.getState().conflicts.filter((c) => c.id !== conflict.id) });
-}
+  if (winner === 'server') {
+    if (conflict.reason === 'deleted' || conflict.server?.deletedAt) {
+      store.discardLocalRecord(bucket, conflict.id);
+    } else {
+      store.applyServerEntity(bucket, conflict.server);
+      store.shiftOutbox([conflict.id]);
+    }
+    store.clearConflict(bucket, conflict.id);
+    return;
+  }
 
-function upsertConflictServerVersion(c: SyncConflict<any>) {
-  const bucket = c.entityType as OutboxEntry['bucket'];
-  const knownBuckets: string[] = ['speakers', 'audio', 'courses', 'courseItems', 'attempts', 'annotations'];
-  if (!knownBuckets.includes(bucket)) return;
-  useStore.getState().applyServerEntity(bucket as any, c.server);
+  // winner === 'client'
+  const entry = store.outbox.find((o) => o.bucket === bucket && o.entity.id === conflict.id);
+  const forcedVersion = (conflict.server?.version ?? 0) + 1;
+  const entity = { ...(entry?.entity ?? conflict.client), version: forcedVersion };
+  const deviceId = await getDeviceId();
+  const res = await api.push({
+    deviceId,
+    [bucket]: [{ entity, baseVersion: conflict.server?.version ?? 0 }],
+  } as SyncPushPayload);
+  if (res.accepted.includes(conflict.id)) {
+    store.shiftOutbox([conflict.id]);
+    store.applyServerEntity(bucket, entity);
+    store.clearConflict(bucket, conflict.id);
+  } else {
+    const known = new Set(store.conflicts.map((c) => `${c.entityType}:${c.id}`));
+    store.setConflicts([
+      ...store.conflicts,
+      ...res.conflicts.filter((c) => !known.has(`${c.entityType}:${c.id}`)),
+    ]);
+    throw new Error('强制覆盖仍被拒绝（对方又产生了新版本），请再次同步后重试');
+  }
 }

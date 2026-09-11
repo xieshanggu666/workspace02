@@ -167,7 +167,10 @@ export class SyncService {
           }
           target.version = outcome.newVersion;
           target.deviceId = payload.deviceId || won.deviceId || target.deviceId || null;
-          target.updatedAt = new Date() as any;
+          // LWW 语义要求 updatedAt 表示「最后一次编辑发生的时间」，必须随记录传播；
+          // 若用服务器收货时间覆盖，离线设备带真实编辑时间的写入会被错误排序。
+          // 仅在客户端缺时间戳时退回服务器时钟。
+          target.updatedAt = (won.updatedAt ? new Date(won.updatedAt) : new Date()) as any;
           if (won.deletedAt) target.deletedAt = new Date(won.deletedAt);
           await repo.save(target);
           accepted.push(won.id);

@@ -13,7 +13,7 @@
     "build:api": "npm run build -w @dialect/api",
     "dev:api": "npm run start:dev -w @dialect/api",
     "seed": "npm run seed -w @dialect/api",
-    "test": "npm run test -w @dialect/shared && npm run test -w @dialect/api",
+    "test": "npm run test -w @dialect/shared && npm run test -w @dialect/api && npm run test -w @dialect/mobile",
     "mobile": "npm run start -w @dialect/mobile",
     "db:up": "docker compose up -d mysql",
     "db:logs": "docker compose logs -f mysql",

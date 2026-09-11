@@ -5,6 +5,7 @@ import type {
   UserDto, SpeakerDto, AudioAssetDto, CourseDto, CourseItemDto,
   PracticeAttemptDto, AnnotationDto, Syncable, SyncConflict,
 } from '@dialect/shared';
+import type { SyncPullResult } from '@dialect/shared';
 
 export type Bucket =
   | 'speakers'
@@ -55,9 +56,13 @@ interface DataState {
   attachLocalMedia: (id: string, uri: string) => void;
 
   /** 服务端拉取结果落库 */
-  applyPull: (pull: import('@dialect/shared').SyncPullResult) => void;
+  applyPull: (pull: SyncPullResult) => void;
   /** 合并单个服务端实体（冲突裁决后也可复用） */
   applyServerEntity: (bucket: Bucket, entity: Syncable) => void;
+  /** 冲突裁决为「采用服务端」且服务端记录已删除时：丢弃本地记录与待推送队列项 */
+  discardLocalRecord: (bucket: Bucket, id: string) => void;
+  /** 裁决后按 (bucket,id) 精确移除冲突 */
+  clearConflict: (bucket: string, id: string) => void;
 
   shiftOutbox: (ids: string[]) => void;
   setConflicts: (c: SyncConflict<any>[]) => void;
@@ -94,7 +99,8 @@ export const useStore = create<DataState>()(
       setMe: (me) => set({ me }),
       setHydrated: () => set({ hydrated: true }),
 
-      upsertLocal: (bucket, entity, extra) => {        const state = get();
+      upsertLocal: (bucket, entity, extra) => {
+        const state = get();
         const table = state[bucket] as Record<string, Syncable>;
         const previous = table[entity.id];
         const stamped: Syncable = {
@@ -102,7 +108,14 @@ export const useStore = create<DataState>()(
           updatedAt: new Date().toISOString(),
           version: previous ? Math.max(previous.version, entity.version || 1) : entity.version || 1,
         };
-        const baseVersion = previous?.version ?? 0;
+        // baseVersion 必须是「上次与服务器同步时」的版本：
+        //  - 已在 outbox 中（连续离线编辑）→ 沿用原 baseVersion，绝不能抬成本地自增版本，
+        //    否则本地新建记录第二次编辑后会被服务端误判为 deleted 冲突；
+        //  - 否则取当前已知版本（本地表是上次 pull 的快照）。
+        const pending = state.outbox.find(
+          (o) => o.bucket === bucket && o.entity.id === entity.id,
+        );
+        const baseVersion = pending ? pending.baseVersion : previous?.version ?? 0;
 
         const nextTable = { ...table, [entity.id]: stamped };
         const outbox = [
@@ -123,12 +136,25 @@ export const useStore = create<DataState>()(
         const table = state[bucket] as Record<string, Syncable>;
         const previous = table[id];
         if (!previous) return;
+        const pending = state.outbox.find((o) => o.bucket === bucket && o.entity.id === id);
+        const others = state.outbox.filter((o) => !(o.bucket === bucket && o.entity.id === id));
+        const nextTable = { ...table };
+
+        // 从未成功推送到服务端（baseVersion=0）的本地记录：直接本地丢弃，不下发墓碑
+        const baseVersion = pending ? pending.baseVersion : previous.version;
+        if (baseVersion === 0) {
+          delete nextTable[id];
+          set({ [bucket]: nextTable, outbox: others } as any);
+          return;
+        }
+
         const tombstone: Syncable = { ...previous, deletedAt: new Date().toISOString() };
+        nextTable[id] = tombstone;
         set({
-          [bucket]: { ...table, [id]: tombstone },
+          [bucket]: nextTable,
           outbox: [
-            ...state.outbox.filter((o) => !(o.bucket === bucket && o.entity.id === id)),
-            { bucket, baseVersion: previous.version, entity: tombstone, createdAt: new Date().toISOString() },
+            ...others,
+            { bucket, baseVersion, entity: tombstone, createdAt: new Date().toISOString() },
           ],
         } as any);
       },
@@ -141,28 +167,52 @@ export const useStore = create<DataState>()(
         set({ [bucket]: { ...table, [entity.id]: entity } } as any);
       },
 
+      discardLocalRecord: (bucket, id) => {
+        const table = get()[bucket] as Record<string, any>;
+        const next = { ...table };
+        delete next[id];
+        set({
+          [bucket]: next,
+          outbox: get().outbox.filter((o) => !(o.bucket === bucket && o.entity.id === id)),
+        } as any);
+      },
+
+      clearConflict: (bucket, id) =>
+        set({ conflicts: get().conflicts.filter((c) => !(c.entityType === bucket && c.id === id)) }),
+
       applyPull: (pull) => {
-        const merge = <T extends Syncable>(local: Record<string, T>, remote: T[]) => {
+        // 关键：outbox 中仍待推送的记录（无论新建/编辑/软删）一律不得被
+        // 拉取结果静默覆盖——否则离线编辑会在联网同步时丢失、版本合并形同虚设。
+        // 这些记录由 push 的冲突结果（或用户在冲突卡片上的裁决）决定最终版本。
+        const s = get();
+        const pendingByBucket: Record<string, Set<string>> = {};
+        for (const o of s.outbox) {
+          (pendingByBucket[o.bucket] ??= new Set<string>()).add(o.entity.id);
+        }
+
+        const mergeTable = <T extends Syncable>(bucket: Bucket, local: Record<string, T>, remote: T[]) => {
+          const protectedIds = pendingByBucket[bucket];
+          if (!protectedIds || protectedIds.size === 0) {
+            // 无待推送编辑：服务端快照直接为准（含墓碑）
+            const next = { ...local };
+            for (const e of remote) next[e.id] = e;
+            return next;
+          }
           const next = { ...local };
           for (const e of remote) {
-            const existing = next[e.id];
-            // 未提交的本地编辑不能被静默覆盖，交由冲突流程处理
-            const hasPending = get().outbox.some(
-              (o) => (o.bucket as string) === bucketNameFor(next) && o.entity.id === e.id,
-            );
-            if (existing && hasPending) continue;
+            if (protectedIds.has(e.id)) continue; // 保留本地版本，等待 push 合并
             next[e.id] = e;
           }
           return next;
         };
 
         set({
-          speakers: merge(get().speakers, pull.speakers),
-          audio: merge(get().audio, pull.audio),
-          courses: merge(get().courses, pull.courses),
-          courseItems: merge(get().courseItems, pull.courseItems),
-          attempts: merge(get().attempts, pull.attempts),
-          annotations: merge(get().annotations, pull.annotations),
+          speakers: mergeTable('speakers', s.speakers, pull.speakers),
+          audio: mergeTable('audio', s.audio, pull.audio),
+          courses: mergeTable('courses', s.courses, pull.courses),
+          courseItems: mergeTable('courseItems', s.courseItems, pull.courseItems),
+          attempts: mergeTable('attempts', s.attempts, pull.attempts),
+          annotations: mergeTable('annotations', s.annotations, pull.annotations),
           cursor: pull.cursor,
         } as any);
       },
@@ -200,18 +250,10 @@ export const useStore = create<DataState>()(
         annotations: s.annotations,
         localMedia: s.localMedia,
         outbox: s.outbox,
+        conflicts: s.conflicts,
         lastSyncAt: s.lastSyncAt,
       }),
       onRehydrateStorage: () => (state) => state?.setHydrated(),
     },
   ),
 );
-
-/** merge() 里只用于跳过保护的桶名推断 */
-function bucketNameFor(table: unknown): string {
-  const state = useStore.getState();
-  for (const name of ['speakers', 'audio', 'courses', 'courseItems', 'attempts', 'annotations'] as const) {
-    if ((state as any)[name] === table) return name;
-  }
-  return '';
-}
