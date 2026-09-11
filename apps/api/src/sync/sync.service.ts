@@ -94,8 +94,20 @@ export class SyncService {
     };
   }
 
-  /** 增量拉取；含墓碑，客户端据此本地清理 */
-  async pull(cursor: string | undefined, role: string): Promise<SyncPullResult> {
+  /**
+   * 增量拉取；含墓碑，客户端据此本地清理。
+   *
+   * 隐私边界（学员角色）：
+   *  - attempts  仅返回本人提交（不能看到同班其他人的跟读）；
+   *  - annotations 仅返回针对本人 attempt 的教练批注；
+   *  - audio     过滤 restricted；users 不下发；
+   *  - 教练/管理员对练习与批注有全量可见权。
+   */
+  async pull(
+    cursor: string | undefined,
+    role: string,
+    userId: string,
+  ): Promise<SyncPullResult> {
     const epoch = new Date(0).toISOString();
     const result: SyncPullResult = {
       cursor: cursor || epoch,
@@ -115,7 +127,25 @@ export class SyncService {
       if (name === 'audio' && role === 'student') {
         dtos = dtos.filter((d) => d.status !== 'restricted');
       }
-      if (name === 'users' && role !== 'admin') dtos = [];
+      if (name === 'users' && role !== 'admin') {
+        dtos = [];
+      }
+      if (role === 'student') {
+        if (name === 'attempts') {
+          dtos = dtos.filter((d) => d.studentId === userId);
+        } else if (name === 'annotations') {
+          const ownAttemptIds = new Set(
+            (result.attempts as Array<{ id: string }>).map((a) => a.id),
+          );
+          // 增量同步时本批可能不含 attempt 本身（更早的游标已拉过），
+          // 因此再查一次本人 attempt id 兜底。
+          if (ownAttemptIds.size === 0) {
+            const own = await this.buckets.attempts.repo.find({ where: { studentId: userId } as any });
+            own.forEach((a) => ownAttemptIds.add((a as any).id));
+          }
+          dtos = dtos.filter((d) => ownAttemptIds.has(d.attemptId));
+        }
+      }
       (result as any)[name] = dtos;
       for (const r of rows) {
         const t = new Date((r as any).updatedAt).toISOString();
@@ -125,8 +155,12 @@ export class SyncService {
     return result;
   }
 
-  /** 推送合并：单事务，逐记录走共享 mergeRecord 语义 */
-  async push(payload: SyncPushPayload, role: string): Promise<SyncPushResult> {
+  /**
+   * 推送合并：单事务，逐记录走共享 mergeRecord 语义。
+   * 归属强制：学员推送 attempts 时，记录（无论新建还是覆盖已有记录）必须属于本人；
+   * 服务端以登录身份 userId 覆盖 studentId，杜绝冒名/篡改他人练习。
+   */
+  async push(payload: SyncPushPayload, role: string, userId: string): Promise<SyncPushResult> {
     const accepted: string[] = [];
     const conflicts: SyncPushResult['conflicts'] = [];
 
@@ -144,6 +178,15 @@ export class SyncService {
         for (const envelope of envelopes) {
           const clientEntity = envelope.entity as Syncable;
           const serverRow = byId.get(clientEntity.id);
+
+          // 越权防护：学员只能写本人的练习记录（新建/覆盖均校验）
+          if (role === 'student' && name === 'attempts') {
+            if (serverRow && serverRow.studentId !== userId) {
+              throw new ForbiddenException('不能修改其他学员的练习记录');
+            }
+            (clientEntity as any).studentId = userId; // 以登录身份为准
+          }
+
           const serverDto = serverRow ? cfg.toDto(serverRow) : undefined;
 
           const outcome = mergeRecord({

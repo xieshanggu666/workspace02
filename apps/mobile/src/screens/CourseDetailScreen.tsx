@@ -30,6 +30,8 @@ export function CourseDetailScreen({ route, navigation }: any) {
   const attempts = useStore((s) =>
     Object.values(s.attempts)
       .filter((a) => !a.deletedAt && allItems.some((i) => i.id === a.courseItemId))
+      // 学员只看本人提交；服务端 sync/pull 已按账号过滤，这里再兜底一层
+      .filter((a) => (me?.role === 'student' ? a.studentId === me.id : true))
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1)),
   );
 

@@ -109,6 +109,8 @@ npm start            # Expo Dev Server；模拟器按 i / a，真机装 Expo Go 
 3. **授权闸门**：下载媒体时校验 `speaker.consentStatus` 与角色——
    `revoked` 仅 investigator/admin 可调档；`pending`/sensitive 对学员 403。
 4. **撤回联动**：撤回授权后名下素材在两端置 restricted；学员端列表和同步拉取都会过滤。
+5. **练习数据归属**：学员只能读写本人的跟读与收到的批注（见第六节「学员练习数据的归属与隔离」），
+   归属以 JWT 登录身份为准，知道他人 attempt id 也无法覆盖录音或读到评语。
 
 ## 六、同步协议（版本合并）
 
@@ -141,17 +143,38 @@ LWW 比较的才是真实编辑先后而非收货时间；仅当客户端缺时�
 回归测试：`apps/mobile/src/store.test.ts`（8 例，可把守卫改回旧实现复现 3 例失败）、
 `src/sync.test.ts`（4 例冲突裁决），随 `npm test` 一起运行。
 
+### 学员练习数据的归属与隔离
+
+跟读练习属于学员个人隐私（声音+评语），所有通道都以 **JWT 里的登录身份**为准，
+请求体里的 `studentId` 一律不可信：
+
+| 通道 | 规则 |
+|---|---|
+| `GET /sync/pull`（学员） | `attempts` 只下发本人提交；`annotations` 只下发挂在本人 attempt 上的批注（增量游标同样过滤） |
+| `POST /sync/push`（学员） | 服务端把 `studentId` 强制改写为登录账号；覆盖已有记录但归属不是本人 → 403，整事务回滚 |
+| `POST /practice/attempts` | 新建允许；用他人已存在的 attempt id 提交 → 403；落库 `studentId` 取 token |
+| `POST /practice/attempts/:id/file` | 学员只能给本人 attempt 上传/重录；持他人 id 覆盖 → 403（且文件不会被写） |
+| `GET /practice/attempts/:id/file` | 学员只能下载本人录音；教练/管理员可读全部用于批注 |
+| `GET /practice/attempts/:id/annotations` | 学员只能读本人 attempt 的批注，遍历他人 id → 403 |
+| 移动端 | 同步服务端已过滤；课程页再按 `studentId === me.id` 兜底过滤，双保险 |
+
+教练/管理员角色不受归属过滤（需要听全班跟读、写批注）；`speakers/courses` 等其他桶的
+角色闸门不变。相关用例见 `apps/api/test/integration.test.ts`（练习归属/越权上传/
+拉取隔离/伪造 studentId 共 6 例）。
+
 ## 七、测试
 
 ```bash
-npm test                 # shared 合并算法 8 例 + api 12 例（加密/WAV/授权闸门/同步E2E/课程对账）
+npm test   # shared 8 例 + api 18 例 + mobile 12 例，共 38 例
 ```
 
 API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
 - AES-GCM 往返、篡改密文被认证标签识破、错误 assetId 无法解密；
 - pending/revoked 授权下学员读取媒体 403、调查员读到解密 RIFF；
 - 离线推送新建 → 拉取可见；旧基线推送产生 `version_conflict`；
-- 课程整课保存后移除条目被软删。
+- 课程整课保存后移除条目被软删；
+- 学员 A/B 互改 attempt、互传录音、互看批注、全量同步互相可见性全部按身份隔离；
+- 伪造请求体 `studentId` 落库仍为登录账号。
 
 ## 八、主要 HTTP 接口（均需 `Authorization: Bearer <token>`，前缀 /api）
 

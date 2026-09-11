@@ -57,8 +57,20 @@ export class PracticeService implements OnModuleInit {
     return a;
   }
 
-  async submitAttempt(dto: PracticeAttemptDto, deviceId?: string): Promise<PracticeAttempt> {
+  /**
+   * 学员提交跟读。
+   * 安全：以登录身份 studentId 为唯一归属来源（忽略请求体里的 studentId），
+   * 且已有记录若非本人所有一律 403，杜绝冒名提交或覆盖他人记录。
+   */
+  async submitAttempt(
+    dto: PracticeAttemptDto,
+    studentId: string,
+    deviceId?: string,
+  ): Promise<PracticeAttempt> {
     let a = await this.attempts.findOneBy({ id: dto.id });
+    if (a && a.studentId !== studentId) {
+      throw new ForbiddenException('不能修改其他学员的练习记录');
+    }
     if (!a) {
       a = this.attempts.create({
         id: dto.id,
@@ -69,25 +81,30 @@ export class PracticeService implements OnModuleInit {
       a.version += 1;
     }
     Object.assign(a, {
-      studentId: dto.studentId,
+      studentId,
       courseItemId: dto.courseItemId,
       audioId: dto.audioId,
       durationSec: dto.durationSec,
       waveformPeaks: dto.waveformPeaks ?? [],
       score: dto.score ?? null,
-      filePath: dto.filePath ?? a.filePath ?? null,
+      filePath: a.filePath ?? null,
       deviceId: deviceId ?? dto.deviceId ?? a.deviceId,
     });
     a.updatedAt = new Date() as any;
     return this.attempts.save(a);
   }
 
-  async attachAttemptFile(id: string, data: Buffer): Promise<PracticeAttempt> {
+  /**
+   * 上传跟读录音二进制。
+   * 安全：学员只能给本人名下的 attempt 上传；教练/管理员不代传。
+   * 文件始终 AES-256-GCM 加密落盘，重复上传即覆盖本人文件（合法的重录场景）。
+   */
+  async attachAttemptFile(id: string, data: Buffer, studentId: string): Promise<PracticeAttempt> {
     const a = await this.getAttemptEntity(id);
-    // 学员录音统一加密
+    if (a.studentId !== studentId) {
+      throw new ForbiddenException('不能替换其他学员的练习录音');
+    }
     const rel = `attempts/${a.id}.wav.enc`;
-    // 与媒体主密钥同域派生（attempt: 前缀区分），此处简单复用 XOR-GCM 包装：
-    // 通过 Node crypto 直接 AES-256-GCM
     const { encryptAttempt } = await import('./attempt-crypto');
     await writeFile(path.join(this.uploadDir, rel), encryptAttempt(data, a.id));
     a.filePath = rel;
@@ -131,7 +148,18 @@ export class PracticeService implements OnModuleInit {
     return this.annotations.save(n);
   }
 
-  async listAnnotations(attemptId: string): Promise<Annotation[]> {
+  /**
+   * 批注列表访问控制：
+   *  - 教练/管理员可看全部；
+   *  - 学员只能看本人 attempt 上的批注（不能遍历他人 attemptId）。
+   */
+  async listAnnotations(attemptId: string, role: string, userId: string): Promise<Annotation[]> {
+    if (role === 'student') {
+      const attempt = await this.attempts.findOneBy({ id: attemptId });
+      if (!attempt || attempt.studentId !== userId) {
+        throw new ForbiddenException('只能查看本人练习的教练批注');
+      }
+    }
     return this.annotations.find({
       where: { attemptId, deletedAt: IsNull() },
       order: { atSec: 'ASC' },
