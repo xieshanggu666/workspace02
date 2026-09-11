@@ -46,7 +46,7 @@ export function RecorderScreen({ route, navigation }: any) {
         durationSec: rec.durationSec,
         sampleRate: 44100,
         channels: 1,
-        mime: 'audio/wav',
+        mime: rec.mime,
         waveformPeaks: rec.peaks,
         syllables: [],
         status: sensitive ? 'restricted' : 'draft',

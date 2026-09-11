@@ -56,7 +56,12 @@ export class PracticeController {
   ) {
     if (!file) throw new BadRequestException('缺少 file 字段');
     return this.mapper.attempt(
-      await this.service.attachAttemptFile(id, file.buffer, req.user.sub),
+      await this.service.attachAttemptFile(
+        id,
+        file.buffer,
+        req.user.sub,
+        file.mimetype || 'audio/wav',
+      ),
     );
   }
 

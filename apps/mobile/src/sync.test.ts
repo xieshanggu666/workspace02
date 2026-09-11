@@ -10,11 +10,22 @@ vi.mock('./config', () => ({
 
 const pushMock = vi.fn();
 const pullMock = vi.fn();
+const uploadMock = vi.fn();
 vi.mock('./api', () => ({
   api: {
-    push: (...args: any[]) => pushMock(...args),
-    pull: (...args: any[]) => pullMock(...args),
+    push: (...args: any[]) => pushMock(...(args as [any])),
+    pull: (...args: any[]) => pullMock(...(args as [any])),
+    uploadFile: (...args: any[]) => uploadMock(...(args as [any])),
   },
+}));
+
+// sync.ts 静态引入了本地加密（含 RN 原生依赖），测试中模拟“解密出明文临时文件”
+const decryptMock = vi.fn(async (uri: string, id: string, ext = 'wav') => ({
+  plainUri: `/tmp/plain-${id}.${ext}`,
+  cleanup: vi.fn(async () => {}),
+}));
+vi.mock('./crypto', () => ({
+  decryptToUploadFile: (...args: any[]) => decryptMock(...args),
 }));
 
 import { syncNow, resolveConflict } from './sync';
@@ -51,6 +62,8 @@ beforeEach(() => {
   resetStore();
   pushMock.mockReset();
   pullMock.mockReset();
+  uploadMock.mockReset();
+  decryptMock.mockClear();
   pullMock.mockResolvedValue(emptyPull());
 });
 
@@ -133,5 +146,49 @@ describe('syncNow —— 冲突时本地未推送编辑不得丢失', () => {
     expect(useStore.getState().speakers['s1']).toBeUndefined();
     expect(useStore.getState().outbox).toHaveLength(0);
     expect(useStore.getState().conflicts).toHaveLength(0);
+  });
+});
+
+describe('syncNow —— 媒体必须解密后再上传', () => {
+  it('outbox 中的加密跟读先解密成明文临时文件再 multipart 上传，且按 mime 决定扩展名', async () => {
+    const encUri = '/tmp/cache/att-x.abcd1234.enc';
+    useStore.getState().upsertLocal(
+      'attempts',
+      {
+        id: 'att-x', studentId: 'u1', courseItemId: 'ci1', audioId: 'a1',
+        durationSec: 1, mime: 'audio/mp4', waveformPeaks: [0.2], score: null,
+        createdAt: '2026-09-11T00:00:00.000Z', version: 1, updatedAt: '2026-09-11T00:00:00.000Z',
+      },
+      { localFileUri: encUri },
+    );
+    pushMock.mockResolvedValue({ accepted: ['att-x'], conflicts: [], rejected: [] });
+    await syncNow();
+
+    // 先解密，且传入 m4a 扩展名
+    expect(decryptMock).toHaveBeenCalledWith(encUri, 'att-x', 'm4a');
+    // 上传的是解密后的明文路径，而不是 .enc
+    expect(uploadMock).toHaveBeenCalledTimes(1);
+    const call = uploadMock.mock.calls[0] as [string, string, string, string];
+    const [uploadPath, uploadedUri, , ext] = call;
+    expect(uploadPath).toBe('/practice/attempts/att-x/file');
+    expect(uploadedUri).toBe('/tmp/plain-att-x.m4a');
+    expect(uploadedUri.endsWith('.enc')).toBe(false);
+    expect(ext).toBe('m4a');
+  });
+
+  it('媒体解密/上传失败：attempt 留在 outbox 下轮重试（元数据也不标记为已完成）', async () => {
+    useStore.getState().upsertLocal(
+      'attempts',
+      {
+        id: 'att-y', studentId: 'u1', courseItemId: 'ci1', audioId: 'a1',
+        durationSec: 1, mime: 'audio/wav', waveformPeaks: [], score: null,
+        createdAt: '2026-09-11T00:00:00.000Z', version: 1, updatedAt: '2026-09-11T00:00:00.000Z',
+      },
+      { localFileUri: '/tmp/cache/att-y.eeee5678.enc' },
+    );
+    pushMock.mockResolvedValue({ accepted: ['att-y'], conflicts: [], rejected: [] });
+    uploadMock.mockRejectedValueOnce(new Error('network down'));
+    await syncNow();
+    expect(useStore.getState().outbox.map((o) => o.entity.id)).toContain('att-y');
   });
 });

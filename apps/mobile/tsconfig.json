@@ -6,5 +6,6 @@
       "@dialect/shared": ["../../packages/shared/src"]
     }
   },
-  "include": ["src", "index.js", "App.tsx"]
+  "include": ["src", "index.js", "App.tsx"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "test"]
 }

@@ -85,6 +85,7 @@ export class PracticeService implements OnModuleInit {
       courseItemId: dto.courseItemId,
       audioId: dto.audioId,
       durationSec: dto.durationSec,
+      mime: dto.mime || a.mime || 'audio/wav',
       waveformPeaks: dto.waveformPeaks ?? [],
       score: dto.score ?? null,
       filePath: a.filePath ?? null,
@@ -98,16 +99,26 @@ export class PracticeService implements OnModuleInit {
    * 上传跟读录音二进制。
    * 安全：学员只能给本人名下的 attempt 上传；教练/管理员不代传。
    * 文件始终 AES-256-GCM 加密落盘，重复上传即覆盖本人文件（合法的重录场景）。
+   * 扩展名按真实格式（iOS wav / Android m4a），下载时回传对应 Content-Type。
    */
-  async attachAttemptFile(id: string, data: Buffer, studentId: string): Promise<PracticeAttempt> {
+  async attachAttemptFile(
+    id: string,
+    data: Buffer,
+    studentId: string,
+    mime = 'audio/wav',
+  ): Promise<PracticeAttempt> {
     const a = await this.getAttemptEntity(id);
     if (a.studentId !== studentId) {
       throw new ForbiddenException('不能替换其他学员的练习录音');
     }
-    const rel = `attempts/${a.id}.wav.enc`;
+    const ext = mime === 'audio/mp4' || mime === 'audio/m4a' || mime === 'audio/aac'
+      ? 'm4a'
+      : 'wav';
+    const rel = `attempts/${a.id}.${ext}.enc`;
     const { encryptAttempt } = await import('./attempt-crypto');
     await writeFile(path.join(this.uploadDir, rel), encryptAttempt(data, a.id));
     a.filePath = rel;
+    a.mime = mime;
     a.version += 1;
     a.updatedAt = new Date() as any;
     return this.attempts.save(a);
@@ -125,7 +136,7 @@ export class PracticeService implements OnModuleInit {
     if (!a.filePath) throw new NotFoundException('练习录音尚未上传');
     const { decryptAttempt } = await import('./attempt-crypto');
     const data = decryptAttempt(await readFile(path.join(this.uploadDir, a.filePath)), a.id);
-    return { mime: 'audio/wav', data };
+    return { mime: a.mime || 'audio/wav', data };
   }
 
   async addAnnotation(dto: AnnotationDto, coachId: string, deviceId?: string): Promise<Annotation> {

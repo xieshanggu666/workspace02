@@ -1,4 +1,5 @@
 import { useRef, useState, useCallback } from 'react';
+import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system';
 import { Audio } from 'expo-av';
 import * as Crypto from 'expo-crypto';
@@ -10,11 +11,36 @@ export interface RecordingResult {
   encUri: string;
   durationSec: number;
   peaks: number[];
+  /** 真实音频格式（解密后/上传时使用） */
+  ext: 'wav' | 'm4a';
+  mime: string;
+}
+
+/** iOS 录 LINEARPCM/wav；Android 录 AAC/m4a（系统支持最好） */
+export const RECORDING_FORMAT = {
+  ext: Platform.OS === 'ios' ? ('wav' as const) : ('m4a' as const),
+  mime: Platform.OS === 'ios' ? 'audio/wav' : 'audio/mp4',
+};
+
+function recordingOptions() {
+  const base = Audio.RecordingOptionsPresets.HIGH_QUALITY;
+  if (Platform.OS === 'ios') {
+    return {
+      ...base,
+      isMeteringEnabled: true,
+      ios: {
+        ...base.ios,
+        extension: '.wav',
+        outputFormat: Audio.IOSOutputFormat.LINEARPCM,
+        audioQuality: Audio.IOSAudioQuality.HIGH,
+      },
+    };
+  }
+  return { ...base, isMeteringEnabled: true }; // Android 默认 .m4a / AAC
 }
 
 /**
  * 录音采集：
- *  - expo-av 录制 WAV（iOS: LINEARPCM/wav；Android 使用默认容器，演示统一按 wav 处理）
  *  - 录音中每 100ms 回调一次 metering（dB），归一化为 0..1 波形峰值
  *  - 录完立刻本地 AES 加密落盘，明文文件立即删除
  */
@@ -32,22 +58,10 @@ export function useFieldRecorder() {
 
     peaksRef.current = [];
     startedAt.current = Date.now();
-    const { recording } = await Audio.Recording.createAsync({
-      ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
-      isMeteringEnabled: true,
-      android: {
-        ...Audio.RecordingOptionsPresets.HIGH_QUALITY.android,
-      },
-      ios: {
-        ...Audio.RecordingOptionsPresets.HIGH_QUALITY.ios,
-        extension: '.wav',
-        outputFormat: Audio.IOSOutputFormat.LINEARPCM,
-      },
-    });
+    const { recording } = await Audio.Recording.createAsync(recordingOptions());
     recRef.current = recording;
     setIsRecording(true);
 
-    // 开启电平计量并以 100ms 频率回调
     recording.setProgressUpdateInterval(100);
     recording.setOnRecordingStatusUpdate((status) => {
       if (!status.isRecording) return;
@@ -69,9 +83,10 @@ export function useFieldRecorder() {
 
     const durationSec = (Date.now() - startedAt.current) / 1000;
     const id = `aud-${Crypto.randomUUID()}`;
-    const finalUri = uri || `${FileSystem.cacheDirectory}${id}.wav`;
+    const { ext, mime } = RECORDING_FORMAT;
+    const finalUri = uri || `${FileSystem.cacheDirectory}${id}.${ext}`;
     const encUri = await encryptFile(finalUri, id);
-    return { id, encUri, durationSec: Number(durationSec.toFixed(2)), peaks: peaksRef.current };
+    return { id, encUri, durationSec: Number(durationSec.toFixed(2)), peaks: peaksRef.current, ext, mime };
   }, []);
 
   const cancel = useCallback(async () => {
@@ -85,9 +100,13 @@ export function useFieldRecorder() {
   return { start, stop, cancel, isRecording, elapsed };
 }
 
-/** 播放本地加密文件：解密到临时 wav 后交给系统播放器 */
-export async function playEncrypted(encUri: string, id: string): Promise<Audio.Sound> {
-  const tmp = await decryptToTempFile(encUri, id);
+/** 播放本地加密文件：解密到临时文件后交给系统播放器，播完即删 */
+export async function playEncrypted(
+  encUri: string,
+  id: string,
+  ext: 'wav' | 'm4a' = 'wav',
+): Promise<Audio.Sound> {
+  const tmp = await decryptToTempFile(encUri, id, ext);
   const { sound } = await Audio.Sound.createAsync({ uri: tmp }, { shouldPlay: true });
   sound.setOnPlaybackStatusUpdate((status) => {
     if (status.isLoaded && status.didJustFinish) {

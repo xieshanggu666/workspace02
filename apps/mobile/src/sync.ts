@@ -1,6 +1,7 @@
 import { api } from './api';
 import { getDeviceId } from './config';
 import { useStore, type OutboxEntry } from './store';
+import { decryptToUploadFile } from './crypto';
 import type { SyncPushPayload, SyncConflict } from '@dialect/shared';
 
 /**
@@ -36,19 +37,34 @@ export async function syncNow(): Promise<{ pushed: number; conflicts: number; pu
   const pushResult = await api.push(payload);
   const acceptedIds = new Set(pushResult.accepted);
 
-  // 上传成功条目的本地媒体文件
+  // 上传成功条目的本地媒体文件。
+  // 关键：本地存的是 DENC1 密文容器，必须先解密成临时【明文】再上传——
+  // 直传密文会让服务端把容器体当 wav/m4a 处理，下载后无法播放。
+  // 是否在服务端静态加密由服务端按授权状态决定。
   const mediaEntries = outbox.filter((o) => o.localFileUri && acceptedIds.has(o.entity.id));
+  const uploadedMediaIds: string[] = [];
   for (const entry of mediaEntries) {
+    const record = entry.entity as any;
+    const ext: 'wav' | 'm4a' = record.mime === 'audio/mp4' || String(entry.localFileUri).endsWith('.m4a.enc')
+      ? 'm4a'
+      : 'wav';
+    let plainUri: string | null = null;
+    let cleanup: (() => Promise<void>) | null = null;
     try {
+      const dec = await decryptToUploadFile(entry.localFileUri!, entry.entity.id, ext);
+      plainUri = dec.plainUri;
+      cleanup = dec.cleanup;
       const uploadPath =
         entry.bucket === 'attempts'
           ? `/practice/attempts/${entry.entity.id}/file`
           : `/audio/${entry.entity.id}/file`;
-      const localFileUri: string = entry.localFileUri!;
-      await api.uploadFile(uploadPath, localFileUri, 'file');
+      await api.uploadFile(uploadPath, plainUri, 'file', ext);
+      uploadedMediaIds.push(entry.entity.id);
     } catch (e) {
       // 媒体补传失败不阻塞元数据；保留在 outbox 下轮重试
       acceptedIds.delete(entry.entity.id);
+    } finally {
+      await cleanup?.();
     }
   }
 

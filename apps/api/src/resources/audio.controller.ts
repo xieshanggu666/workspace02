@@ -67,7 +67,9 @@ export class AudioController {
   @UseInterceptors(FileInterceptor('file'))
   async upload(@Param('id') id: string, @UploadedFile() file?: Express.Multer.File) {
     if (!file) throw new ForbiddenException('缺少 file 字段');
-    return this.mapper.audio(await this.service.attachFile(id, file.buffer));
+    return this.mapper.audio(
+      await this.service.attachFile(id, file.buffer, file.mimetype),
+    );
   }
 
   /** 下载录音；受限资源在内存解密，并做角色/授权闸门校验 */

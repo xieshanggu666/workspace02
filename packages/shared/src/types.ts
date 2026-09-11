@@ -103,6 +103,8 @@ export interface PracticeAttemptDto extends Syncable {
   audioId: string;
   filePath?: string | null;
   durationSec: number;
+  /** 跟读录音格式：iOS audio/wav、Android audio/mp4(m4a) */
+  mime?: string | null;
   waveformPeaks: number[];
   /** 0..100，可由后续语音对齐模块填充 */
   score?: number | null;

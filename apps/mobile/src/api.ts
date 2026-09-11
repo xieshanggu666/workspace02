@@ -60,38 +60,48 @@ export const api = {
 
   push: (payload: SyncPushPayload) => request<SyncPushResult>('POST', '/sync/push', payload),
 
-  /** 上传录音二进制（multipart）。敏感与否由服务端按元数据决定是否加密。 */
+  /**
+   * 上传录音二进制（multipart）。
+   * 调用方必须传【明文】临时文件（本地密文先解密）；ext 决定文件名与 MIME。
+   * 敏感与否由服务端按元数据决定是否再次静态加密。
+   */
   uploadFile: async (
     path: string,
     fileUri: string,
     fieldName: 'file',
+    ext: 'wav' | 'm4a' = 'wav',
   ): Promise<void> => {
     const base = await getApiBase();
     const token = await getToken();
+    const mime = ext === 'm4a' ? 'audio/mp4' : 'audio/wav';
     const form = new FormData();
     form.append(fieldName, {
       uri: fileUri,
-      name: fileUri.split('/').pop() || 'rec.wav',
-      type: 'audio/wav',
+      name: `${fieldName}.${ext}`,
+      type: mime,
     } as any);
     const res = await fetch(`${base}${path}`, {
       method: 'POST',
-      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), 'Content-Type': 'multipart/form-data' },
+      // 不手动设置 Content-Type：RN 需要自己写入 multipart boundary
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: form,
     });
     if (!res.ok) throw new ApiError(res.status, await res.text());
   },
 
-  /** 下载媒体到本地路径（服务端已解密 / 已过授权闸门） */
-  downloadFile: async (mediaPath: string, destUri: string): Promise<string> => {
+  /** 下载媒体，返回 { uri, mime }（服务端已过授权闸门并解密） */
+  downloadFile: async (
+    mediaPath: string,
+    destUri: string,
+  ): Promise<{ uri: string; mime: string }> => {
     const base = await getApiBase();
     const token = await getToken();
     const res = await fetch(`${base}${mediaPath}`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) throw new ApiError(res.status, `下载失败 ${res.status}`);
+    const mime = res.headers.get('content-type') || 'audio/wav';
     const blob = await res.blob();
-    // RN 上把 blob 以 base64 落盘
     const reader = new FileReader();
     const b64: string = await new Promise((resolve, reject) => {
       reader.onload = () => resolve(String(reader.result).split(',')[1]);
@@ -101,6 +111,6 @@ export const api = {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const FileSystem = require('expo-file-system');
     await FileSystem.writeAsStringAsync(destUri, b64, { encoding: FileSystem.EncodingType.Base64 });
-    return destUri;
+    return { uri: destUri, mime };
   },
 };

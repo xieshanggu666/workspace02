@@ -64,7 +64,8 @@ export class MapperService {
   attempt(a: PracticeAttempt): PracticeAttemptDto {
     return {
       id: a.id, studentId: a.studentId, courseItemId: a.courseItemId, audioId: a.audioId,
-      filePath: a.filePath, durationSec: a.durationSec, waveformPeaks: a.waveformPeaks || [],
+      filePath: a.filePath, durationSec: a.durationSec, mime: a.mime || 'audio/wav',
+      waveformPeaks: a.waveformPeaks || [],
       score: a.score, createdAt: iso(a.createdAt)!,
       version: a.version, deviceId: a.deviceId, updatedAt: a.updatedAt, deletedAt: iso(a.deletedAt),
     };

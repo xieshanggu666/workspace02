@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, ScrollView, Alert, TextInput } from 'react-nati
 import * as Crypto from 'expo-crypto';
 import * as FileSystem from 'expo-file-system';
 import { Audio } from 'expo-av';
-import { useFieldRecorder } from '../recorder';
+import { useFieldRecorder, playEncrypted } from '../recorder';
 import { useStore } from '../store';
 import { api } from '../api';
 import { theme } from '../ui/theme';
@@ -44,9 +44,14 @@ export function CourseDetailScreen({ route, navigation }: any) {
 
   const playOriginal = async (audioId: string) => {
     try {
-      const dest = `${FileSystem.cacheDirectory}orig-${audioId}.wav`;
-      await api.downloadFile(`/audio/${audioId}/file`, dest);
-      const { sound } = await Audio.Sound.createAsync({ uri: dest }, { shouldPlay: true });
+      const tmp = `${FileSystem.cacheDirectory}orig-${audioId}.bin`;
+      const { mime } = await api.downloadFile(`/audio/${audioId}/file`, tmp);
+      const realExt = mime.includes('mp4') || mime.includes('aac') || mime.includes('m4a')
+        ? 'm4a'
+        : 'wav';
+      const uri = `${FileSystem.cacheDirectory}orig-${audioId}.${realExt}`;
+      await FileSystem.moveAsync({ from: tmp, to: uri });
+      const { sound } = await Audio.Sound.createAsync({ uri }, { shouldPlay: true });
       sound.setOnPlaybackStatusUpdate((st) => st.isLoaded && st.didJustFinish && sound.unloadAsync());
     } catch (e: any) {
       Alert.alert('原音不可用', e?.message || String(e));
@@ -73,6 +78,7 @@ export function CourseDetailScreen({ route, navigation }: any) {
         courseItemId: item.id,
         audioId: item.audioId,
         durationSec: rec.durationSec,
+        mime: rec.mime,
         waveformPeaks: rec.peaks,
         score: null,
         createdAt: new Date().toISOString(),
@@ -80,8 +86,9 @@ export function CourseDetailScreen({ route, navigation }: any) {
         updatedAt: new Date().toISOString(),
       };
       upsertLocal('attempts', dto, { localFileUri: rec.encUri });
+      useStore.getState().attachLocalMedia(dto.id, rec.encUri);
       setLastAttempt(dto);
-      Alert.alert('跟读已加密保存', '将在同步时上传给教练。');
+      Alert.alert('跟读已加密保存', '可当场试听，或在联网后同步上传给教练。');
     } catch (e) {
       Alert.alert('保存失败', String(e));
     } finally {
@@ -154,9 +161,11 @@ function AttemptRow({ attempt, canAnnotate }: { attempt: PracticeAttemptDto; can
   const annotations = useStore((s) =>
     Object.values(s.annotations).filter((x) => x.attemptId === attempt.id && !x.deletedAt),
   );
+  const localEnc = useStore((s) => s.localMedia[attempt.id]);
   const upsertLocal = useStore((s) => s.upsertLocal);
   const [comment, setComment] = useState('');
   const [atSec, setAtSec] = useState('0');
+  const [busy, setBusy] = useState(false);
 
   const addAnnotation = () => {
     if (!comment.trim()) return;
@@ -173,11 +182,38 @@ function AttemptRow({ attempt, canAnnotate }: { attempt: PracticeAttemptDto; can
     setComment('');
   };
 
+  const playAttempt = async () => {
+    try {
+      setBusy(true);
+      const ext: 'wav' | 'm4a' = attempt.mime === 'audio/mp4' || attempt.mime === 'audio/aac' ? 'm4a' : 'wav';
+      if (localEnc) {
+        // 本机刚录的：直接解密本地密文试听
+        await playEncrypted(localEnc, attempt.id, ext);
+        return;
+      }
+      // 远端（教练听学员跟读）：服务端按身份授权后返回明文
+      const tmp = `${FileSystem.cacheDirectory}att-${attempt.id}.bin`;
+      const { mime } = await api.downloadFile(`/practice/attempts/${attempt.id}/file`, tmp);
+      const realExt = mime.includes('mp4') || mime.includes('aac') || mime.includes('m4a') ? 'm4a' : 'wav';
+      const uri = `${FileSystem.cacheDirectory}att-${attempt.id}.${realExt}`;
+      await FileSystem.moveAsync({ from: tmp, to: uri });
+      const { sound } = await Audio.Sound.createAsync({ uri }, { shouldPlay: true });
+      sound.setOnPlaybackStatusUpdate((st) => st.isLoaded && st.didJustFinish && sound.unloadAsync());
+    } catch (e: any) {
+      Alert.alert('无法播放', e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <View style={{ borderTopWidth: 1, borderTopColor: theme.color.border, paddingVertical: 8 }}>
-      <Text style={styles.meta}>
-        {new Date(attempt.createdAt).toLocaleString()} · {attempt.durationSec.toFixed(1)}s
-      </Text>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+        <Text style={styles.meta}>
+          {new Date(attempt.createdAt).toLocaleString()} · {attempt.durationSec.toFixed(1)}s
+        </Text>
+        <Button title={busy ? '…' : '▶ 试听'} small variant="ghost" onPress={playAttempt} />
+      </View>
       <Waveform peaks={attempt.waveformPeaks} durationSec={attempt.durationSec} syllables={[]} height={56} />
       {annotations.map((an) => (
         <View key={an.id} style={{ flexDirection: 'row', marginTop: 4 }}>

@@ -17,6 +17,9 @@ export class PracticeAttempt extends SyncEntity {
   @Column({ type: 'varchar', length: 255, nullable: true })
   filePath: string | null;
 
+  @Column({ type: 'varchar', length: 32, default: 'audio/wav' })
+  mime: string;
+
   @Column({ type: 'double precision', default: 0 })
   durationSec: number;
 

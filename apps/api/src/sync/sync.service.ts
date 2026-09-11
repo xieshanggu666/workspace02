@@ -80,7 +80,7 @@ export class SyncService {
         repo: ds.getRepository(PracticeAttempt),
         toDto: (e: PracticeAttempt) => this.mapper.attempt(e),
         canPush: (r) => r === 'student' || r === 'admin',
-        fields: ['studentId', 'courseItemId', 'audioId', 'durationSec',
+        fields: ['studentId', 'courseItemId', 'audioId', 'durationSec', 'mime',
           'waveformPeaks', 'score', 'createdAt'],
         dateFields: ['createdAt'],
       },

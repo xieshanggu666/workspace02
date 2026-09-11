@@ -319,4 +319,22 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
     const row = await ds.getRepository(entities.PracticeAttempt).findOneBy({ id: 'att-priv-3' });
     expect(row?.studentId).toBe('stu-a');
   });
+
+  it('Android m4a/AAC 跟读：按真实 MIME 存盘，读回的 Content-Type 不是 wav', async () => {
+    const id = 'att-mime-1';
+    await practice.submitAttempt({
+      id, studentId: 'stu-a', courseItemId: 'i1', audioId: 'a2',
+      durationSec: 0.8, mime: 'audio/mp4', waveformPeaks: [0.2], score: null,
+      createdAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any, 'stu-a');
+    await practice.attachAttemptFile(id, Buffer.from('ftypM4A-binary-aac'), 'stu-a', 'audio/mp4');
+
+    const row = await ds.getRepository(entities.PracticeAttempt).findOneBy({ id });
+    expect(row?.filePath).toBe(`attempts/${id}.m4a.enc`);
+    expect(row?.mime).toBe('audio/mp4');
+
+    const back = await practice.readAttemptFile(id, 'stu-a', 'stu-a');
+    expect(back.mime).toBe('audio/mp4');
+    expect(back.data.toString()).toBe('ftypM4A-binary-aac');
+  });
 });

@@ -101,16 +101,22 @@ npm start            # Expo Dev Server；模拟器按 i / a，真机装 Expo Go 
 
 ## 五、安全模型
 
-1. **端侧**：录音停止瞬间用 AES-256-CBC（PBKDF2 10k 轮、每文件独立盐/IV）加密，
-   明文文件立即删除；主密钥存 expo-secure-store（Keychain / Keystore）。
+1. **端侧**：录音停止瞬间用 AES-256-CBC（PBKDF2 10k 轮、每文件独立盐/IV）加密成
+   `DENC1` 容器，明文文件立即删除；主密钥存 expo-secure-store（Keychain / Keystore）。
+   - 试听：`decryptToTempFile()` 用正规 `CipherParams` 解密到 cache 临时文件播放，播完即删；
+   - 同步上传：**先在端上解密成临时明文再 multipart 上传**（绝不直传 `DENC1` 容器，
+     否则服务端/播放器会把密文当音频），传完删除临时文件。是否在服务端静态加密由服务端决定。
 2. **服务端静态加密**：`sensitive=true` 或授权未完成/已撤回的录音以
-   AES-256-GCM 落盘（`uploads/audio/*.wav.enc`），密钥 =
+   AES-256-GCM 落盘（`uploads/audio/*.wav.enc|*.m4a.enc`、`uploads/attempts/*`），密钥 =
    `SHA256(主密钥 || "media:v1:" || assetId)`，一录一密、可轮换；GCM 标签防篡改。
 3. **授权闸门**：下载媒体时校验 `speaker.consentStatus` 与角色——
    `revoked` 仅 investigator/admin 可调档；`pending`/sensitive 对学员 403。
 4. **撤回联动**：撤回授权后名下素材在两端置 restricted；学员端列表和同步拉取都会过滤。
 5. **练习数据归属**：学员只能读写本人的跟读与收到的批注（见第六节「学员练习数据的归属与隔离」），
    归属以 JWT 登录身份为准，知道他人 attempt id 也无法覆盖录音或读到评语。
+6. **录音格式**：iOS 录 `LINEARPCM/wav`，Android 录 `AAC/m4a`；MIME 随元数据
+   （`AudioAsset.mime` / `PracticeAttempt.mime`）贯穿同步、上传、落盘扩展名与下载
+   `Content-Type`，播放器按真实格式解码，不会出现把 m4a 当 wav 或把密文当音频的问题。
 
 ## 六、同步协议（版本合并）
 
@@ -165,7 +171,7 @@ LWW 比较的才是真实编辑先后而非收货时间；仅当客户端缺时�
 ## 七、测试
 
 ```bash
-npm test   # shared 8 例 + api 18 例 + mobile 12 例，共 38 例
+npm test   # shared 8 例 + api 19 例 + mobile 19 例，共 46 例
 ```
 
 API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
@@ -174,7 +180,10 @@ API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
 - 离线推送新建 → 拉取可见；旧基线推送产生 `version_conflict`；
 - 课程整课保存后移除条目被软删；
 - 学员 A/B 互改 attempt、互传录音、互看批注、全量同步互相可见性全部按身份隔离；
-- 伪造请求体 `studentId` 落库仍为登录账号。
+- 伪造请求体 `studentId` 落库仍为登录账号；
+- 端侧 `DENC1` 容器 seal/open 往返、容器损坏拒绝、明文不落盘；
+- 同步上传走“先解密后上传”（断言 multipart 拿到的是明文临时文件而非 `.enc`）；
+- m4a/wav 跟读按真实 MIME 存盘并以对应 `Content-Type` 解密返回。
 
 ## 八、主要 HTTP 接口（均需 `Authorization: Bearer <token>`，前缀 /api）
 

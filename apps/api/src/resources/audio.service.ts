@@ -89,14 +89,18 @@ export class AudioService implements OnModuleInit {
     return this.repo.save(entity);
   }
 
-  async attachFile(id: string, data: Buffer): Promise<AudioAsset> {
+  async attachFile(id: string, data: Buffer, mime?: string): Promise<AudioAsset> {
     const asset = await this.getEntity(id);
     const keyVersion = asset.sensitive ? Math.max(1, asset.keyVersion ?? 1) : null;
     const payload = keyVersion ? this.crypto.encrypt(data, asset.id, keyVersion) : data;
-    const ext = keyVersion ? 'wav.enc' : 'wav';
+    const rawExt = mime === 'audio/mp4' || mime === 'audio/m4a' || mime === 'audio/aac'
+      ? 'm4a'
+      : 'wav';
+    const ext = keyVersion ? `${rawExt}.enc` : rawExt;
     const rel = `audio/${asset.id}.${ext}`;
     await writeFile(path.join(this.uploadDir, rel), payload);
     asset.filePath = rel;
+    if (mime) asset.mime = mime;
     asset.keyVersion = keyVersion;
     asset.version += 1;
     asset.updatedAt = new Date() as any;

@@ -65,13 +65,18 @@ export function AssetEditorScreen({ route }: any) {
 
   const play = async () => {
     try {
+      const ext: 'wav' | 'm4a' =
+        asset.mime === 'audio/mp4' || asset.mime === 'audio/m4a' || asset.mime === 'audio/aac'
+          ? 'm4a'
+          : 'wav';
       if (localEnc) {
-        await playEncrypted(localEnc, id);
+        // 本地刚录的：DENC1 密文先解密成临时明文再播
+        await playEncrypted(localEnc, id, ext);
         return;
       }
-      // 远端：下载后播放（敏感录音服务端会做角色/授权校验）
+      // 远端：服务端解密并过授权闸门后返回明文，扩展名要匹配真实格式
       setBusy(true);
-      const dest = `${FileSystem.cacheDirectory}remote-${id}.wav`;
+      const dest = `${FileSystem.cacheDirectory}remote-${id}.${ext}`;
       await api.downloadFile(`/audio/${id}/file`, dest);
       const { sound } = await Audio.Sound.createAsync({ uri: dest }, { shouldPlay: true });
       sound.setOnPlaybackStatusUpdate((st) => {
