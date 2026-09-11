@@ -4,7 +4,7 @@ import { DataSource, In, Repository } from 'typeorm';
 import {
   User, Speaker, AudioAsset, Course, CourseItem, PracticeAttempt, Annotation,
 } from '../entities';
-import { mergeRecord, type EntityBucket } from '@dialect/shared';
+import { mergeRecord, canAccessMedia, canUseInCourse, type EntityBucket } from '@dialect/shared';
 import type {
   SyncPullResult, SyncPushPayload, SyncPushResult, Syncable,
 } from '@dialect/shared';
@@ -97,11 +97,11 @@ export class SyncService {
   /**
    * 增量拉取；含墓碑，客户端据此本地清理。
    *
-   * 隐私边界（学员角色）：
-   *  - attempts  仅返回本人提交（不能看到同班其他人的跟读）；
-   *  - annotations 仅返回针对本人 attempt 的教练批注；
-   *  - audio     过滤 restricted；users 不下发；
-   *  - 教练/管理员对练习与批注有全量可见权。
+   * 隐私/同意范围边界：
+   *  - attempts     学员仅本人提交；annotations 仅本人 attempt 上的批注；
+   *  - audio        学员/教练只收到同意范围允许分发的素材
+   *                 （research/pending/revoked/敏感素材不下发），staff 全量；
+   *  - users        仅 admin。
    */
   async pull(
     cursor: string | undefined,
@@ -115,6 +115,32 @@ export class SyncService {
       attempts: [], annotations: [],
     };
 
+    // 非 staff 角色需要说话人授权信息来过滤 audio
+    const staff = role === 'investigator' || role === 'admin';
+    let speakerMap = new Map<string, Speaker>();
+    let allowedAudioForStudent: Set<string> | null = null;
+    if (!staff) {
+      const all = await this.buckets.speakers.repo.find();
+      speakerMap = new Map(all.map((s) => [s.id, s as Speaker]));
+    }
+    if (role === 'student') {
+      const allAssets = await this.buckets.audio.repo.find();
+      allowedAudioForStudent = new Set(
+        allAssets
+          .filter((a) =>
+            canAccessMedia(
+              {
+                consentStatus: speakerMap.get(a.speakerId)?.consentStatus,
+                consentScope: speakerMap.get(a.speakerId)?.consentScope,
+                sensitive: a.sensitive,
+              },
+              'student',
+            ),
+          )
+          .map((a) => a.id),
+      );
+    }
+
     for (const [name, cfg] of Object.entries(this.buckets) as Array<[EntityBucket, BucketConfig<any>]>) {
       const since = cursor ? new Date(cursor) : new Date(0);
       const rows = await cfg.repo
@@ -124,11 +150,25 @@ export class SyncService {
         .getMany();
 
       let dtos = rows.map((r) => cfg.toDto(r));
-      if (name === 'audio' && role === 'student') {
-        dtos = dtos.filter((d) => d.status !== 'restricted');
+      if (name === 'audio' && !staff) {
+        dtos = dtos.filter((d) => {
+          const spk = speakerMap.get(d.speakerId);
+          return canAccessMedia(
+            {
+              consentStatus: spk?.consentStatus,
+              consentScope: spk?.consentScope,
+              sensitive: d.sensitive,
+            },
+            role as any,
+          );
+        });
       }
       if (name === 'users' && role !== 'admin') {
         dtos = [];
+      }
+      // 学员的课程条目只保留指向授权范围内素材的
+      if (name === 'courseItems' && role === 'student' && allowedAudioForStudent) {
+        dtos = dtos.filter((d) => allowedAudioForStudent!.has(d.audioId));
       }
       if (role === 'student') {
         if (name === 'attempts') {
@@ -202,6 +242,25 @@ export class SyncService {
           }
 
           const won = outcome.entity as any;
+
+          // 同意范围闸门：课程条目不能引用仅限研究/未授权/已撤回的素材
+          if (name === 'courseItems' && !won.deletedAt && won.audioId) {
+            const asset = await manager
+              .getRepository(AudioAsset)
+              .findOneBy({ id: won.audioId });
+            const spk = asset
+              ? await manager.getRepository(Speaker).findOneBy({ id: asset.speakerId })
+              : null;
+            if (!asset || !canUseInCourse(
+              { consentStatus: spk?.consentStatus, consentScope: spk?.consentScope },
+              'coach',
+            )) {
+              throw new ForbiddenException(
+                `课程条目引用的素材 ${won.audioId} 不在课程授权范围内（research/pending/revoked 不可编入课程）`,
+              );
+            }
+          }
+
           const target = serverRow ?? repo.create({ id: won.id });
           const allDateFields = new Set([...cfg.dateFields, ...(cfg.metaDateFields || ['deletedAt'])]);
           for (const f of cfg.fields) {

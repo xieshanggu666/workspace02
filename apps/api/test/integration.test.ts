@@ -71,8 +71,8 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
     expect(created.consentStatus).toBe('pending');
 
     const granted = await speakers.grantConsent('s1', {
-      scope: 'research',
-      agreementText: '本人同意录音用于方言研究。',
+      scope: 'course',
+      agreementText: '本人同意录音用于方言研究与跟读课程。',
     });
     expect(granted.consentStatus).toBe('granted');
     expect(granted.consentHash).toMatch(/^sha256:[a-f0-9]{64}$/);
@@ -172,12 +172,34 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
   });
 
   it('课程整课保存：条目 upsert 对账，移除的条目被软删', async () => {
+    // 课程只能引用 course/public 授权素材：新建合规说话人与两条素材
+    await speakers.upsert({
+      id: 's4', code: 'T-4', name: '课程授权发音人', dialect: '粤语', region: '广州',
+      consentStatus: 'granted', consentScope: 'course', version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await speakers.upsert({
+      id: 's5', code: 'T-5', name: '公开授权发音人', dialect: '粤语', region: '佛山',
+      consentStatus: 'granted', consentScope: 'public', version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.upsert({
+      id: 'a4', title: '可入课素材1', speakerId: 's4', ownerId: 'u1', dialect: '粤语',
+      durationSec: 0.1, sampleRate: 16000, channels: 1, mime: 'audio/wav',
+      waveformPeaks: [0.2], syllables: [], status: 'annotated', sensitive: false,
+      recordedAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.upsert({
+      id: 'a5', title: '可入课素材2', speakerId: 's5', ownerId: 'u1', dialect: '粤语',
+      durationSec: 0.1, sampleRate: 16000, channels: 1, mime: 'audio/wav',
+      waveformPeaks: [0.2], syllables: [], status: 'annotated', sensitive: false,
+      recordedAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+
     const dto = {
       id: 'c1', title: '测试课', coachId: 'u1', dialect: '粤语', published: false,
       version: 1, updatedAt: new Date().toISOString(),
       items: [
-        { id: 'i1', courseId: 'c1', audioId: 'a2', orderIndex: 0, repeatTimes: 2, version: 1, updatedAt: new Date().toISOString() },
-        { id: 'i2', courseId: 'c1', audioId: 'a1', orderIndex: 1, repeatTimes: 4, version: 1, updatedAt: new Date().toISOString() },
+        { id: 'i1', courseId: 'c1', audioId: 'a4', orderIndex: 0, repeatTimes: 2, version: 1, updatedAt: new Date().toISOString() },
+        { id: 'i2', courseId: 'c1', audioId: 'a5', orderIndex: 1, repeatTimes: 4, version: 1, updatedAt: new Date().toISOString() },
       ],
     } as any;
     await courses.saveCourse(dto);
@@ -188,7 +210,7 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
       ...dto,
       items: [
         { ...dto.items[0] },
-        { id: 'i3', courseId: 'c1', audioId: 'a1', orderIndex: 1, repeatTimes: 1, version: 1, updatedAt: new Date().toISOString() },
+        { id: 'i3', courseId: 'c1', audioId: 'a5', orderIndex: 1, repeatTimes: 1, version: 1, updatedAt: new Date().toISOString() },
       ],
     });
     saved = await courses.getDto('c1');
@@ -196,6 +218,110 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
 
     const stale = await ds.getRepository(entities.CourseItem).findOneBy({ id: 'i2' });
     expect(stale?.deletedAt).not.toBeNull();
+  });
+
+  // ============ 知情同意范围（consent scope）强制 ============
+
+  it('research 授权素材：学员/教练不能下载、列表与同步都不出现', async () => {
+    await speakers.upsert({
+      id: 's6', code: 'T-6', name: '仅研究授权', dialect: '西南官话', region: '成都',
+      consentStatus: 'granted', consentScope: 'research', version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.upsert({
+      id: 'a6', title: '仅限研究的录音', speakerId: 's6', ownerId: 'u1', dialect: '西南官话',
+      durationSec: 0.1, sampleRate: 16000, channels: 1, mime: 'audio/wav',
+      waveformPeaks: [0.2], syllables: [], status: 'annotated', sensitive: false,
+      recordedAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.attachFile('a6', Buffer.from('RIFF-research-only'));
+
+    await expect(audio.readMedia('a6', 'student')).rejects.toMatchObject({ status: 403 });
+    await expect(audio.readMedia('a6', 'coach')).rejects.toMatchObject({ status: 403 });
+    expect((await audio.readMedia('a6', 'investigator')).data.toString()).toBe('RIFF-research-only');
+
+    expect((await audio.list({ role: 'coach' })).some((x) => x.id === 'a6')).toBe(false);
+    expect((await audio.list({ role: 'student' })).some((x) => x.id === 'a6')).toBe(false);
+    expect((await audio.list({ role: 'investigator' })).some((x) => x.id === 'a6')).toBe(true);
+
+    const coachPull = await sync.pull(undefined, 'coach', 'coach1');
+    expect(coachPull.audio.some((x) => x.id === 'a6')).toBe(false);
+    const stuPull = await sync.pull(undefined, 'student', 'stu-a');
+    expect(stuPull.audio.some((x) => x.id === 'a6')).toBe(false);
+    const staffPull = await sync.pull(undefined, 'investigator', 'u1');
+    expect(staffPull.audio.some((x) => x.id === 'a6')).toBe(true);
+  });
+
+  it('research 素材不能被编入课程（REST 与 sync push 双通道拒绝）', async () => {
+    await expect(
+      courses.saveCourse({
+        id: 'c-bad', title: '违规课程', coachId: 'coach1', dialect: '西南官话', published: true,
+        version: 1, updatedAt: new Date().toISOString(),
+        items: [
+          { id: 'bad-i1', courseId: 'c-bad', audioId: 'a6', orderIndex: 0, repeatTimes: 3, version: 1, updatedAt: new Date().toISOString() },
+        ],
+      } as any),
+    ).rejects.toMatchObject({ status: 403 });
+
+    await expect(
+      sync.push(
+        {
+          deviceId: 'coach-dev',
+          courses: [{ baseVersion: 0, entity: {
+            id: 'c-bad', title: '违规课程', coachId: 'coach1', dialect: '西南官话',
+            published: true, version: 1, updatedAt: new Date().toISOString(),
+          } as any }],
+          courseItems: [{ baseVersion: 0, entity: {
+            id: 'bad-i1', courseId: 'c-bad', audioId: 'a6', orderIndex: 0,
+            repeatTimes: 3, version: 1, updatedAt: new Date().toISOString(),
+          } as any }],
+        },
+        'coach',
+        'coach1',
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+
+    expect(await ds.getRepository(entities.Course).findOneBy({ id: 'c-bad' })).toBeNull();
+  });
+
+  it('学员视角：含 research 素材的课程在列表/详情/同步课目中都被过滤', async () => {
+    // 混合课程：一句 research(a6) + 一句 course(a4)
+    // 绕过校验直接插库，模拟历史脏数据
+    await ds.getRepository(entities.Course).save(
+      ds.getRepository(entities.Course).create({
+        id: 'c-mixed', title: '混合课', coachId: 'coach1', dialect: '多方言',
+        published: true, itemIds: ['mix-i-research', 'mix-i-ok'],
+        version: 1, updatedAt: new Date(), deletedAt: null,
+      } as any),
+    );
+    await ds.getRepository(entities.CourseItem).save([
+      ds.getRepository(entities.CourseItem).create({
+        id: 'mix-i-research', courseId: 'c-mixed', audioId: 'a6', orderIndex: 0,
+        repeatTimes: 3, version: 1, updatedAt: new Date(), deletedAt: null,
+      } as any),
+      ds.getRepository(entities.CourseItem).create({
+        id: 'mix-i-ok', courseId: 'c-mixed', audioId: 'a4', orderIndex: 1,
+        repeatTimes: 3, version: 1, updatedAt: new Date(), deletedAt: null,
+      } as any),
+    ]);
+
+    // 学员列表保留该课但只剩合规课目
+    const list = await courses.list(true, 'student');
+    const mixed = list.find((c) => c.id === 'c-mixed');
+    expect(mixed?.items.map((i) => i.audioId)).toEqual(['a4']);
+
+    // 学员详情同样过滤
+    const detail = await courses.getDtoForStudent('c-mixed');
+    expect(detail.items.some((i) => i.audioId === 'a6')).toBe(false);
+
+    // 同步课目不含 research 引用
+    const stuPull = await sync.pull(undefined, 'student', 'stu-a');
+    expect(stuPull.courseItems.some((i) => i.audioId === 'a6')).toBe(false);
+    expect(stuPull.courseItems.some((i) => i.audioId === 'a4')).toBe(true);
+
+    // 教练视角不受此过滤
+    const coachList = await courses.list(true, 'coach');
+    const coachMixed = coachList.find((c) => c.id === 'c-mixed');
+    expect(coachMixed?.items.length).toBe(2);
   });
 
   // ================= 学员练习隐私与越权防护 =================

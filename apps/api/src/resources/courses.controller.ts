@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Delete, Get, Param, Post, Put, Query, Req, UseGuards,
+  Body, Controller, Delete, ForbiddenException, Get, Param, Post, Put, Query, Req, UseGuards,
 } from '@nestjs/common';
 import type { CourseDto } from '@dialect/shared';
 import { AuthGuard, JwtPayload } from '../auth/auth.guard';
@@ -13,13 +13,17 @@ export class CoursesController {
 
   @Get()
   list(@Req() req: { user: JwtPayload }, @Query('published') published?: string) {
-    // 学员端只看已发布；教练/调查员看全部
+    // 学员端只看已发布且引用素材在课程授权范围内；教练/调查员看全部
     const only = req.user.role === 'student' ? true : published === 'true';
-    return this.service.list(only);
+    return this.service.list(only, req.user.role);
   }
 
   @Get(':id')
-  get(@Param('id') id: string) {
+  async get(@Param('id') id: string, @Req() req: { user: JwtPayload }) {
+    if (req.user.role === 'student') {
+      // 学员不返回越界素材的课目；整课没有合规素材则 403
+      return this.service.getDtoForStudent(id);
+    }
     return this.service.getDto(id);
   }
 

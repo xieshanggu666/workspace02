@@ -3,11 +3,12 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Not, Repository } from 'typeorm';
+import { In, IsNull, Not, Repository } from 'typeorm';
 import { mkdir, writeFile, readFile } from 'fs/promises';
 import * as path from 'path';
 import { AudioAsset, Speaker } from '../entities';
-import type { AudioAssetDto } from '@dialect/shared';
+import type { AudioAssetDto, AppRole } from '@dialect/shared';
+import { canAccessMedia, mediaDenyReason } from '@dialect/shared';
 import { MapperService } from './mapper.service';
 import { MediaCryptoService } from '../media/media-crypto.service';
 import { SpeakersService } from './speakers.service';
@@ -42,12 +43,38 @@ export class AudioService implements OnModuleInit {
     await mkdir(path.join(this.uploadDir, 'attempts'), { recursive: true });
   }
 
-  async list(filter?: { dialect?: string; speakerId?: string; includeRestricted?: boolean }): Promise<AudioAsset[]> {
+  /**
+   * 列表按角色执行知情同意范围过滤：
+   *  - investigator/admin：全部（含 restricted、research、pending、revoked）
+   *  - coach：已授予且 scope ∈ {course,public} 的素材（research/pending/revoked 不列）
+   *  - student：同教练集合，但课程引用下载仍会再做一次闸门校验
+   */
+  async list(
+    filter: { dialect?: string; speakerId?: string; includeRestricted?: boolean; role?: AppRole } = {},
+  ): Promise<AudioAsset[]> {
     const where: any = { deletedAt: IsNull() };
-    if (filter?.dialect) where.dialect = filter.dialect;
-    if (filter?.speakerId) where.speakerId = filter.speakerId;
-    if (!filter?.includeRestricted) where.status = Not('restricted');
-    return this.repo.find({ where, order: { recordedAt: 'DESC' } });
+    if (filter.dialect) where.dialect = filter.dialect;
+    if (filter.speakerId) where.speakerId = filter.speakerId;
+    const staff = filter.role === 'investigator' || filter.role === 'admin';
+    if (!filter.includeRestricted && !staff) where.status = Not('restricted');
+    const rows = await this.repo.find({ where, order: { recordedAt: 'DESC' } });
+    if (staff) return rows;
+
+    const speakers = await this.speakers.findBy({
+      id: In(Array.from(new Set(rows.map((r) => r.speakerId)))),
+    });
+    const byId = new Map(speakers.map((s) => [s.id, s]));
+    return rows.filter((r) => {
+      const spk = byId.get(r.speakerId);
+      return canAccessMedia(
+        {
+          consentStatus: spk?.consentStatus,
+          consentScope: spk?.consentScope,
+          sensitive: r.sensitive,
+        },
+        filter.role || 'student',
+      );
+    });
   }
 
   async getEntity(id: string): Promise<AudioAsset> {
@@ -113,17 +140,19 @@ export class AudioService implements OnModuleInit {
    */
   async readMedia(
     id: string,
-    role: 'investigator' | 'speaker' | 'coach' | 'student' | 'admin',
+    role: AppRole,
   ): Promise<{ mime: string; data: Buffer }> {
     const asset = await this.getEntity(id);
     const speaker = await this.speakers.findOneBy({ id: asset.speakerId });
-    const trusted = role === 'investigator' || role === 'admin' || role === 'coach';
+    const ctx = {
+      consentStatus: speaker?.consentStatus,
+      consentScope: speaker?.consentScope,
+      sensitive: asset.sensitive,
+    };
 
-    if (speaker?.consentStatus === 'revoked' && !(role === 'investigator' || role === 'admin')) {
-      throw new ForbiddenException('该说话人已撤回授权，素材禁止分发');
-    }
-    if ((asset.sensitive || speaker?.consentStatus === 'pending') && !trusted) {
-      throw new ForbiddenException('受限录音：授权未完成，需调查员/教练权限');
+    // 统一的知情同意闸门：research/pending/revoked/敏感素材对越界角色一律 403
+    if (!canAccessMedia(ctx, role)) {
+      throw new ForbiddenException(mediaDenyReason(ctx, role));
     }
     if (!asset.filePath) throw new NotFoundException('媒体文件尚未上传');
 

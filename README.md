@@ -70,8 +70,8 @@ DB_TYPE=sqlite npm run start:dev
 
 | 方言 | 句子 / IPA | 说话人授权 | 素材状态 |
 |---|---|---|---|
-| 粤语-广州话 | 你好吗？ `nei˨˧ hou˧˥ maː˧` | granted(course) | published |
-| 西南官话-成都话 | 我是成都人 `ŋo˨˩ sɿ˥˧ tsʰən˨˩tu˨˩ nən˨˩˧` | granted(research) | annotated |
+| 粤语-广州话 | 你好吗？ `nei˨˧ hou˧˥ maː˧` | granted(**course**) | published |
+| 西南官话-成都话 | 我是成都人 `ŋo˨˩ sɿ˥˧ tsʰən˨˩tu˨˩ nən˨˩˧` | granted(**research，仅研究**) | annotated，**不可入课/不分发给学员** |
 | 吴语-苏州话 | 侬吃饭了啊？ `noŋ˨˧ tsʰi˥˩ ve˨˧˩ tsi˥˨ a˧` | granted(public) | published |
 | 闽南语-厦门话 | 今仔日天气好 `ka˧˨ a˥˥ lit˩ sĩ˧˧ kʰi˥˩ ho˥˧` | granted(course) | published |
 | 客家语-梅州话 | 我爱食白糖糕 `ŋai˩ oi˥˧ sit˩ pak̚˩ tʰɔŋ˩ kau˧` | **pending（待签）** | **restricted，AES-GCM 加密** |
@@ -81,7 +81,9 @@ DB_TYPE=sqlite npm run start:dev
 `packages/shared/src/samples.ts`，可被前后端直接引用；WAV 由
 `apps/api/src/seeds/generate-wavs.ts` 按音节时间轴合成，无需携带二进制。
 
-示例跟读课《南方方言入门 · 第1课》编排了前 4 句（每句跟读 3 遍 + 教练提示）。
+示例跟读课《南方方言入门 · 第1课》编排了 3 句已取得课程级授权的素材
+（粤语/吴语/闽南语，每句跟读 3 遍 + 教练提示）；**成都话是 research 授权，
+不会出现在任何课程或学员/教练的可下载集合中**。
 
 ## 四、启动手机端
 
@@ -149,6 +151,31 @@ LWW 比较的才是真实编辑先后而非收货时间；仅当客户端缺时�
 回归测试：`apps/mobile/src/store.test.ts`（8 例，可把守卫改回旧实现复现 3 例失败）、
 `src/sync.test.ts`（4 例冲突裁决），随 `npm test` 一起运行。
 
+### 知情同意使用范围（consent scope）
+
+`consentScope` 不是标签，而是在所有分发通道强制执行（纯函数策略
+`packages/shared/src/consent-policy.ts`，前后端共用）：
+
+| scope | 调查员/管理员 | 教练 | 学员 |
+|---|---|---|---|
+| `research` 仅研究 | ✅ 研究/归档 | ❌ 下载/列表/同步 | ❌ 下载/列表/同步 |
+| `course` 跟读课 | ✅ | ✅ 编课/播放 | ✅ 练习 |
+| `public` 公开 | ✅ | ✅ | ✅ |
+| `pending` / `revoked` | 仅 staff | ❌ | ❌ |
+
+强制点（绕过任一个都会被下一个挡住）：
+
+1. `GET /audio/:id/file` 媒体下载闸门：research 对教练/学员返回 403；
+2. `GET /audio` 列表与 `/sync/pull` 的 `audio`：非 staff 不下发 research/pending/revoked；
+3. 课程保存 `POST/PUT /courses` 与发布 `/courses/:id/publish`：引用 research 等越界素材
+   直接 403，先校验后写库，不产生半截数据；
+4. `/sync/push` 的 `courseItems`：引用越界素材抛 403，整个事务回滚；
+5. 学员视角的课程列表/详情/`courseItems` 同步：过滤掉越界课目（防止历史脏数据）；
+6. 移动端课程编排页只列出 `canUseInCourse` 的素材。
+
+扩大使用范围（例如把 research 素材用于课程）必须先让发音人重新签署 course/public
+授权（`POST /speakers/:id/consent`），系统不提供任何“管理员特批进课”的旁路。
+
 ### 学员练习数据的归属与隔离
 
 跟读练习属于学员个人隐私（声音+评语），所有通道都以 **JWT 里的登录身份**为准，
@@ -171,12 +198,14 @@ LWW 比较的才是真实编辑先后而非收货时间；仅当客户端缺时�
 ## 七、测试
 
 ```bash
-npm test   # shared 8 例 + api 19 例 + mobile 19 例，共 46 例
+npm test   # shared 15 例 + api 22 例 + mobile 19 例，共 56 例
 ```
 
 API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
 - AES-GCM 往返、篡改密文被认证标签识破、错误 assetId 无法解密；
-- pending/revoked 授权下学员读取媒体 403、调查员读到解密 RIFF；
+- pending/revoked/research 授权下教练与学员读取媒体 403、调查员读到解密 RIFF；
+- research 素材在列表、同步、下载三通道对教练/学员不可见；
+- research 素材编入课程在 REST 与 sync 双通道 403；混合脏数据课程对学员过滤；
 - 离线推送新建 → 拉取可见；旧基线推送产生 `version_conflict`；
 - 课程整课保存后移除条目被软删；
 - 学员 A/B 互改 attempt、互传录音、互看批注、全量同步互相可见性全部按身份隔离；

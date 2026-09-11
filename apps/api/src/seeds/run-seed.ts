@@ -103,8 +103,9 @@ async function run() {
   }
 
   console.log('▶ 编排示例跟读课《南方方言入门 · 第1课》…');
+  // 只可编入 scope=course/public 的素材；成都话是 research 授权，不能进课
   const courseId = 'crs-dialect101';
-  const lessonAudioIds = ['aud-yue-hello', 'aud-swg-chengdu', 'aud-wu-suzhou', 'aud-nan-xiamen'];
+  const lessonAudioIds = ['aud-yue-hello', 'aud-wu-suzhou', 'aud-nan-xiamen'];
   await ds.getRepository(Course).save(
     ds.getRepository(Course).create({
       id: courseId,
@@ -122,7 +123,6 @@ async function run() {
   );
   const tips = [
     '注意广州话声调上扬，句末语气词要轻。',
-    '成都话“我”是舌根鼻音 ŋ 开头，别读成 w。',
     '苏州话保留浊声母，“饭”的声带振动要明显。',
     '厦门话有入声短促韵尾 -t，“日”要收得快。',
   ];

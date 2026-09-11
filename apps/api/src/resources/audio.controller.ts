@@ -24,9 +24,14 @@ export class AudioController {
     @Query('dialect') dialect?: string,
     @Query('speakerId') speakerId?: string,
   ) {
-    // 学员看不到 restricted；调查员/教练可以
-    const trusted = ['investigator', 'coach', 'admin'].includes(req.user.role);
-    const rows = await this.service.list({ dialect, speakerId, includeRestricted: trusted });
+    // 列表按知情同意范围过滤：staff 见全部；教练/学员只见 course/public
+    const staff = ['investigator', 'admin'].includes(req.user.role);
+    const rows = await this.service.list({
+      dialect,
+      speakerId,
+      includeRestricted: staff,
+      role: req.user.role,
+    });
     return rows.map((a) => this.mapper.audio(a));
   }
 

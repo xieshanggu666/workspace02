@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { View, Text, FlatList, Pressable, StyleSheet, TextInput, Alert } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { useStore } from '../store';
+import { canUseInCourse } from '@dialect/shared';
 import { theme } from '../ui/theme';
 import { Button, Card, Tag } from '../ui/bits';
 import type { CourseDto, CourseItemDto } from '@dialect/shared';
@@ -15,9 +16,18 @@ export function CourseEditorScreen({ route, navigation }: any) {
   const existing = useStore((s) => (existingId ? s.courses[existingId] : undefined));
   const me = useStore((s) => s.me);
   const allItems = useStore((s) => s.courseItems);
+  const speakers = useStore((s) => s.speakers);
   const assets = useStore((s) =>
     Object.values(s.audio)
       .filter((a) => !a.deletedAt && a.status !== 'restricted')
+      // 同意范围闸门：research / pending / revoked 的素材不能编入跟读课
+      .filter((a) => {
+        const spk = speakers[a.speakerId];
+        return canUseInCourse(
+          { consentStatus: spk?.consentStatus, consentScope: spk?.consentScope },
+          'coach',
+        );
+      })
       .sort((x, y) => x.title.localeCompare(y.title)),
   );
   const upsertLocal = useStore((s) => s.upsertLocal);
@@ -120,7 +130,12 @@ export function CourseEditorScreen({ route, navigation }: any) {
             onChangeText={setDescription}
             multiline
           />
-          <Text style={styles.meta}>已选 {picked.length} 句（按选择顺序为课次顺序，可上下移动）</Text>
+          <Text style={styles.meta}>
+            已选 {picked.length} 句（按选择顺序为课次顺序，可上下移动）
+          </Text>
+          <Text style={[styles.meta, { color: theme.color.danger, marginTop: 4 }]}>
+            仅限研究（research）或未完成/已撤回授权的素材不会出现在下方，不能编入课程。
+          </Text>
         </Card>
       }
       renderItem={({ item, index: _index }) => {
