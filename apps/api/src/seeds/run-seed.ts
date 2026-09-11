@@ -71,7 +71,9 @@ async function run() {
     );
   }
 
-  console.log('▶ 生成 6 条方言示例 WAV（敏感条目加密）…');
+  console.log('▶ 生成 6 条方言示例 WAV（撤回/待签/research 范围一律加密封口）…');
+  // speakerId → 是否可课程/公开分发
+  const speakerById = new Map(SAMPLE_SPEAKERS.map((s) => [s.id, s]));
   for (const seed of SAMPLE_AUDIO) {
     const { buffer, peaks } = generateWavBuffer(
       seed.syllables,
@@ -79,15 +81,21 @@ async function run() {
       seed.baseFreq,
       seed.asset.sampleRate,
     );
-    const sensitive = seed.asset.sensitive;
-    const keyVersion = sensitive ? 1 : null;
-    const rel = `audio/${seed.asset.id}.${sensitive ? 'wav.enc' : 'wav'}`;
-    const payload = sensitive ? crypto.encrypt(buffer, seed.asset.id, 1) : buffer;
+    const spk = speakerById.get(seed.asset.speakerId);
+    const distributable =
+      spk?.consentStatus === 'granted' &&
+      (spk.consentScope === 'course' || spk.consentScope === 'public');
+    // 不可课程/公开分发的素材（pending/revoked/research）全部加密落盘
+    const sealed = !!seed.asset.sensitive || !distributable;
+    const keyVersion = sealed ? 1 : null;
+    const rel = `audio/${seed.asset.id}.${sealed ? 'wav.enc' : 'wav'}`;
+    const payload = sealed ? crypto.encrypt(buffer, seed.asset.id, 1) : buffer;
     await writeFile(path.join(uploadDir, rel), payload);
 
     await ds.getRepository(AudioAsset).save(
       ds.getRepository(AudioAsset).create({
         ...seed.asset,
+        sensitive: !!seed.asset.sensitive,
         syllables: seed.syllables,
         waveformPeaks: peaks,
         filePath: rel,
@@ -99,7 +107,7 @@ async function run() {
         recordedAt: new Date('2026-09-01T02:00:00Z'),
       } as unknown as AudioAsset),
     );
-    console.log(`   · ${seed.asset.dialect}  ${seed.asset.title}  ${sensitive ? '[AES-GCM 加密]' : ''}`);
+    console.log(`   · ${seed.asset.dialect}  ${seed.asset.title}  ${sealed ? '[AES-GCM 加密]' : ''}`);
   }
 
   console.log('▶ 编排示例跟读课《南方方言入门 · 第1课》…');

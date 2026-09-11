@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ALL_ENTITIES } from '../entities';
 import { AuthModule } from '../auth/auth.module';
 import { MapperService } from './mapper.service';
+import { ConsentEnforcementService } from './consent-enforcement.service';
 import { SpeakersService } from './speakers.service';
 import { SpeakersController } from './speakers.controller';
 import { AudioService } from './audio.service';
@@ -15,7 +16,22 @@ import { PracticeController } from './practice.controller';
 @Module({
   imports: [TypeOrmModule.forFeature(ALL_ENTITIES), AuthModule],
   controllers: [SpeakersController, AudioController, CoursesController, PracticeController],
-  providers: [MapperService, SpeakersService, AudioService, CoursesService, PracticeService],
-  exports: [MapperService, SpeakersService, AudioService, CoursesService, PracticeService, TypeOrmModule],
+  providers: [
+    MapperService,
+    ConsentEnforcementService,
+    SpeakersService,
+    AudioService,
+    CoursesService,
+    PracticeService,
+  ],
+  exports: [
+    MapperService,
+    ConsentEnforcementService,
+    SpeakersService,
+    AudioService,
+    CoursesService,
+    PracticeService,
+    TypeOrmModule,
+  ],
 })
 export class ResourcesModule {}

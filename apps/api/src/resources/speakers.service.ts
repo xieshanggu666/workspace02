@@ -6,6 +6,7 @@ import { Speaker } from '../entities';
 import type { ConsentScope, ConsentStatus, SpeakerDto } from '@dialect/shared';
 import { sanitizeClientTime } from '@dialect/shared';
 import { MapperService } from './mapper.service';
+import { ConsentEnforcementService } from './consent-enforcement.service';
 import { JwtPayload } from '../auth/auth.guard';
 
 /**
@@ -18,6 +19,7 @@ export class SpeakersService {
   constructor(
     @InjectRepository(Speaker) private readonly repo: Repository<Speaker>,
     private readonly mapper: MapperService,
+    private readonly enforcement: ConsentEnforcementService,
   ) {}
 
   list(): Promise<Speaker[]> {
@@ -75,17 +77,33 @@ export class SpeakersService {
     s.version += 1;
     s.updatedAt = new Date() as any;
     const saved = await this.repo.save(s);
+    // 范围收窄到 research（不再允许课程/公开分发）：立即封口
+    if (body.scope === 'research') {
+      await this.enforcement.sealSpeakerAssets(id);
+    } else if (body.scope === 'course' || body.scope === 'public') {
+      // 从撤回/research 恢复：元数据恢复可分发（已加密文件保留加密）
+      await this.enforcement.restoreSpeakerAssets(id);
+    }
     return this.mapper.speaker(saved);
   }
 
-  /** 撤回授权（被调查人行使删除/撤回权时调用） */
-  async revokeConsent(id: string, _user?: JwtPayload): Promise<SpeakerDto> {
+  /**
+   * 撤回授权（被调查人行使删除/撤回权时调用）。
+   * 不仅翻转状态，还必须把名下明文录音封口为 AES-GCM 密文、删除明文，
+   * 与「撤回即封口」的界面与文档承诺一致。
+   * @returns 更新后的说话人 + 本次新加密文件数
+   */
+  async revokeConsent(
+    id: string,
+    _user?: JwtPayload,
+  ): Promise<{ speaker: SpeakerDto; sealed: number }> {
     const s = await this.get(id);
     s.consentStatus = 'revoked';
     s.consentScope = null;
     s.version += 1;
     s.updatedAt = new Date() as any;
     const saved = await this.repo.save(s);
-    return this.mapper.speaker(saved);
+    const sealed = await this.enforcement.sealSpeakerAssets(id);
+    return { speaker: this.mapper.speaker(saved), sealed };
   }
 }

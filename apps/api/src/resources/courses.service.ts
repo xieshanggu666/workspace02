@@ -72,13 +72,14 @@ export class CoursesService {
     return new Set(
       assets
         .filter((a) =>
+          // 分发只看授权；撤回封口后若重新获得 course/public，即使文件仍加密也恢复可用
           canUseInCourse(
             {
               consentStatus: spk.get(a.speakerId)?.consentStatus,
               consentScope: spk.get(a.speakerId)?.consentScope,
             },
             'coach',
-          ) && !a.sensitive,
+          ),
         )
         .map((a) => a.id),
     );

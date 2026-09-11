@@ -9,6 +9,7 @@ import type {
   SyncPullResult, SyncPushPayload, SyncPushResult, Syncable,
 } from '@dialect/shared';
 import { MapperService } from '../resources/mapper.service';
+import { ConsentEnforcementService } from '../resources/consent-enforcement.service';
 
 interface BucketConfig<E> {
   repo: Repository<E & { id: string }>;
@@ -35,6 +36,7 @@ export class SyncService {
   constructor(
     @InjectDataSource() private readonly ds: DataSource,
     private readonly mapper: MapperService,
+    private readonly enforcement: ConsentEnforcementService,
   ) {
     this.buckets = {
       users: {
@@ -219,6 +221,9 @@ export class SyncService {
   async push(payload: SyncPushPayload, role: string, userId: string): Promise<SyncPushResult> {
     const accepted: string[] = [];
     const conflicts: SyncPushResult['conflicts'] = [];
+    // 封口/恢复必须在事务提交后执行（独立仓库读不到未提交的说话人状态）
+    const sealAfterCommit = new Set<string>();
+    const restoreAfterCommit = new Set<string>();
 
     await this.ds.transaction(async (manager) => {
       for (const [name, cfg] of Object.entries(this.buckets) as Array<[EntityBucket, BucketConfig<any>]>) {
@@ -230,6 +235,11 @@ export class SyncService {
         const ids = envelopes.map((e) => e.entity.id);
         const rows = await repo.find({ where: { id: In(ids) } });
         const byId = new Map<string, any>(rows.map((r: any) => [r.id, r]));
+        // 保存前快照旧状态：rows 里的实体是托管对象，save(target) 后会被就地改写，
+        // 直接引用 serverRow 判断“是否发生状态变化”会拿到变更后的值。
+        const beforeSnapshot = new Map<string, any>(
+          rows.map((r: any) => [r.id, { consentStatus: r.consentStatus, consentScope: r.consentScope }]),
+        );
 
         for (const envelope of envelopes) {
           const clientEntity = envelope.entity as Syncable;
@@ -316,10 +326,40 @@ export class SyncService {
           target.updatedAt = (won.updatedAt ? new Date(won.updatedAt) : new Date()) as any;
           if (won.deletedAt) target.deletedAt = new Date(won.deletedAt);
           await repo.save(target);
+
+          // 同步通道的授权状态变化同样触发封口/恢复，不能只靠 REST
+          if (name === 'speakers') {
+            const before = beforeSnapshot.get(won.id);
+            const after = target as Speaker;
+            const becameRevoked = after.consentStatus === 'revoked' && before?.consentStatus !== 'revoked';
+            const narrowedToResearch =
+              after.consentStatus === 'granted' &&
+              after.consentScope === 'research' &&
+              before?.consentScope !== 'research';
+            const restoredDistributable =
+              after.consentStatus === 'granted' &&
+              (after.consentScope === 'course' || after.consentScope === 'public') &&
+              (before?.consentStatus !== 'granted' ||
+                (before.consentScope !== 'course' && before.consentScope !== 'public'));
+            if (becameRevoked || narrowedToResearch) {
+              sealAfterCommit.add(after.id);
+            } else if (restoredDistributable) {
+              restoreAfterCommit.add(after.id);
+            }
+          }
+
           accepted.push(won.id);
         }
       }
     });
+
+    // 事务提交后再做文件系统封口/恢复
+    for (const id of sealAfterCommit) {
+      await this.enforcement.sealSpeakerAssets(id);
+    }
+    for (const id of restoreAfterCommit) {
+      await this.enforcement.restoreSpeakerAssets(id);
+    }
 
     return { accepted, conflicts, rejected: [] };
   }

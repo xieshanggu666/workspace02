@@ -71,7 +71,7 @@ DB_TYPE=sqlite npm run start:dev
 | 方言 | 句子 / IPA | 说话人授权 | 素材状态 |
 |---|---|---|---|
 | 粤语-广州话 | 你好吗？ `nei˨˧ hou˧˥ maː˧` | granted(**course**) | published |
-| 西南官话-成都话 | 我是成都人 `ŋo˨˩ sɿ˥˧ tsʰən˨˩tu˨˩ nən˨˩˧` | granted(**research，仅研究**) | annotated，**不可入课/不分发给学员** |
+| 西南官话-成都话 | 我是成都人 `ŋo˨˩ sɿ˥˧ tsʰən˨˩tu˨˩ nən˨˩˧` | granted(**research，仅研究**) | annotated，**不可入课/不分发，GCM 加密落盘** |
 | 吴语-苏州话 | 侬吃饭了啊？ `noŋ˨˧ tsʰi˥˩ ve˨˧˩ tsi˥˨ a˧` | granted(public) | published |
 | 闽南语-厦门话 | 今仔日天气好 `ka˧˨ a˥˥ lit˩ sĩ˧˧ kʰi˥˩ ho˥˧` | granted(course) | published |
 | 客家语-梅州话 | 我爱食白糖糕 `ŋai˩ oi˥˧ sit˩ pak̚˩ tʰɔŋ˩ kau˧` | **pending（待签）** | **restricted，AES-GCM 加密** |
@@ -108,18 +108,28 @@ npm start            # Expo Dev Server；模拟器按 i / a，真机装 Expo Go 
    - 试听：`decryptToTempFile()` 用正规 `CipherParams` 解密到 cache 临时文件播放，播完即删；
    - 同步上传：**先在端上解密成临时明文再 multipart 上传**（绝不直传 `DENC1` 容器，
      否则服务端/播放器会把密文当音频），传完删除临时文件。是否在服务端静态加密由服务端决定。
-2. **服务端静态加密**：`sensitive=true` 或授权未完成/已撤回的录音以
-   AES-256-GCM 落盘（`uploads/audio/*.wav.enc|*.m4a.enc`、`uploads/attempts/*`），密钥 =
+2. **服务端静态加密**：不可课程/公开分发的录音（`sensitive=true`、授权
+   pending/revoked、scope=research）以 AES-256-GCM 落盘
+   （`uploads/audio/*.wav.enc|*.m4a.enc`、`uploads/attempts/*`），密钥 =
    `SHA256(主密钥 || "media:v1:" || assetId)`，一录一密、可轮换；GCM 标签防篡改。
 3. **授权闸门**：下载媒体时校验 `speaker.consentStatus` 与角色——
-   `revoked` 仅 investigator/admin 可调档；`pending`/sensitive 对学员 403。
-4. **撤回联动**：撤回授权后名下素材在两端置 restricted；学员端列表和同步拉取都会过滤。
-5. **练习数据归属**：学员只能读写本人的跟读与收到的批注（见第六节「学员练习数据的归属与隔离」），
+   `revoked` 仅 investigator/admin 可调档；`research`/`pending` 对教练与学员 403。
+4. **撤回/收窄即真正封口加密**（`ConsentEnforcementService`，不只是改数据库状态）：
+   - `POST /speakers/:id/revoke` 或授权范围收窄到 `research`、以及 **sync push** 推来
+     同类状态变化时，服务端把该说话人名下所有**明文**媒体读入 → AES-256-GCM
+     加密为 `<id>.<ext>.enc` → **删除明文文件**，素材置 `restricted/sensitive/keyVersion=1`；
+     接口返回 `_sealedFiles`（本次新加密文件数）；操作幂等，已加密素材跳过；
+   - 文件尚未上传时只封元数据，不会报错；事务提交后再做文件系统封口（避免脏读）；
+   - 重新授予 course/public 时元数据恢复可分发，文件**保留加密**（分发授权与静态
+     加密是两件事，下载时按 keyVersion 内存解密）；
+   - 种子数据中 research 范围的成都话同样以 `.wav.enc` 落盘，与待签/撤回素材一致。
+5. **撤回联动**：撤回授权后名下素材在两端置 restricted；学员端列表和同步拉取都会过滤。
+6. **练习数据归属**：学员只能读写本人的跟读与收到的批注（见第六节「学员练习数据的归属与隔离」），
    归属以 JWT 登录身份为准，知道他人 attempt id 也无法覆盖录音或读到评语。
-6. **录音格式**：iOS 录 `LINEARPCM/wav`，Android 录 `AAC/m4a`；MIME 随元数据
+7. **录音格式**：iOS 录 `LINEARPCM/wav`，Android 录 `AAC/m4a`；MIME 随元数据
    （`AudioAsset.mime` / `PracticeAttempt.mime`）贯穿同步、上传、落盘扩展名与下载
    `Content-Type`，播放器按真实格式解码，不会出现把 m4a 当 wav 或把密文当音频的问题。
-7. **存储路径不可被客户端控制（防任意文件读取）**：
+8. **存储路径不可被客户端控制（防任意文件读取）**：
    - 媒体落盘路径（`audio/<id>.<wav|m4a>[.enc]`、`attempts/<id>.<wav|m4a>.enc`）
      **永远只由服务端**的上传接口生成；`filePath`、`keyVersion` 不在元数据编辑接口
      （`PUT /audio/:id`）和同步 push 白名单的可写字段里，教练/学员在请求体里携带的值一律忽略；
@@ -220,7 +230,7 @@ LWW 比较的才是真实编辑先后而非收货时间；仅当客户端缺时�
 ## 七、测试
 
 ```bash
-npm test   # shared 21 例 + api 32 例 + mobile 19 例，共 72 例
+npm test   # shared 22 例 + api 34 例 + mobile 19 例，共 75 例
 ```
 
 API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
@@ -231,7 +241,9 @@ API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
 - 教练注入 `filePath=../../.env`（相对/绝对路径）无法写库、下载仍返回原音频；
   DB 被直接写入穿越路径时读取守卫抛错；教练不能降级敏感素材；
 - 未来时间戳（2999 年）被钳制、全服游标不跳未来、持未来游标的设备下次同步自愈、
-  毒记录之后的正常数据仍能用旧游标拉到、未来版无法在 LWW 中永远压过合法编辑。
+  毒记录之后的正常数据仍能用旧游标拉到、未来版无法在 LWW 中永远压过合法编辑；
+- 撤回/收窄授权把明文文件真正封口为 AES-GCM 密文并删除明文（REST 与 sync 双通道），
+  调查员解密可读、学员/教练 403；重新授权后恢复可分发且文件保留加密；research 播种即加密。
 - 离线推送新建 → 拉取可见；旧基线推送产生 `version_conflict`；
 - 课程整课保存后移除条目被软删；
 - 学员 A/B 互改 attempt、互传录音、互看批注、全量同步互相可见性全部按身份隔离；

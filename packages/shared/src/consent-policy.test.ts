@@ -29,10 +29,15 @@ describe('canAccessMedia —— 知情同意范围闸门', () => {
     expect(canAccessMedia({ consentStatus: 'revoked' }, 'investigator')).toBe(true);
   });
 
-  it('敏感素材（sensitive）即使 scope 是 course，教练/学员也不可取', () => {
-    expect(canAccessMedia({ ...granted('course'), sensitive: true }, 'student')).toBe(false);
-    expect(canAccessMedia({ ...granted('course'), sensitive: true }, 'coach')).toBe(false);
-    expect(canAccessMedia({ ...granted('course'), sensitive: true }, 'admin')).toBe(true);
+  it('已 course 授权但标记 sensitive（重新授权后保留加密落盘）：分发照常放行', () => {
+    // 分发只看授权；sensitive 仅表示是否加密落盘，下载时内存解密
+    expect(canAccessMedia({ ...granted('course'), sensitive: true }, 'student')).toBe(true);
+    expect(canAccessMedia({ ...granted('course'), sensitive: true }, 'coach')).toBe(true);
+  });
+
+  it('pending/revoked 即使带敏感标记也只 staff 可取', () => {
+    expect(canAccessMedia({ consentStatus: 'pending', sensitive: false }, 'student')).toBe(false);
+    expect(canAccessMedia({ consentStatus: 'pending', sensitive: true }, 'student')).toBe(false);
   });
 });
 

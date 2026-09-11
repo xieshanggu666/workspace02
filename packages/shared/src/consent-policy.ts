@@ -8,6 +8,9 @@ export type AppRole = 'investigator' | 'speaker' | 'coach' | 'student' | 'admin'
  * consentStatus：granted / pending / revoked
  * consentScope ：research（仅学术研究）/ course（跟读课程）/ public（公开示范）
  *
+ * 分发决策只看授权状态与范围；素材是否加密落盘（sensitive/keyVersion）是另一回事
+ * —— 撤回封口后即使重新获得 course/public 授权，文件可继续加密存储但分发恢复。
+ *
  *  - research：只供调查员、管理员做研究/归档；教练与学员都不可取，更不能进课程
  *  - course  ：调查员/管理员 + 教练（可编课）+ 学员（可练习）
  *  - public  ：同 course，且语义上允许更广泛公开
@@ -17,7 +20,7 @@ export function canAccessMedia(
   ctx: {
     consentStatus?: ConsentStatus | null;
     consentScope?: ConsentScope | null;
-    /** 素材自身的受限标记（待授权采集等） */
+    /** 仅表示是否加密落盘，不参与分发授权判定 */
     sensitive?: boolean;
   },
   role: AppRole,
@@ -25,10 +28,9 @@ export function canAccessMedia(
   const staff = role === 'investigator' || role === 'admin';
   if (staff) return true;
 
-  const { consentStatus, consentScope, sensitive } = ctx;
+  const { consentStatus, consentScope } = ctx;
 
   if (consentStatus === 'revoked') return false;
-  if (sensitive) return false;
   if (consentStatus !== 'granted') return false; // pending 或未知
   if (consentScope === 'research') return false; // 仅限研究：教练/学员均不可
   if (consentScope === 'course' || consentScope === 'public') return true;
@@ -37,7 +39,7 @@ export function canAccessMedia(
 
 /** 学员练习/下载：只接受已授予且范围至少是课程级 */
 export function canStudentPlay(
-  ctx: { consentStatus?: ConsentStatus | null; consentScope?: ConsentScope | null; sensitive?: boolean },
+  ctx: { consentStatus?: ConsentStatus | null; consentScope?: ConsentScope | null },
 ): boolean {
   return canAccessMedia(ctx, 'student');
 }

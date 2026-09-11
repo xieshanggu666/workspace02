@@ -2,7 +2,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { Test } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
-import { mkdtempSync, rmSync, readFileSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import * as path from 'path';
 
@@ -112,7 +112,94 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
 
     await speakers.revokeConsent('s1');
     await expect(audio.readMedia('a2', 'student')).rejects.toMatchObject({ status: 403 });
+    // 撤回后文件已封口加密：调查员经内存解密仍能读到原文
     expect((await audio.readMedia('a2', 'investigator')).data.toString()).toBe('RIFFxxxxWAVE-public');
+  });
+
+  it('撤回授权会真正把明文文件封口为 AES-GCM 密文并删除明文', async () => {
+    // 新说话人 + course 授权 + 明文素材
+    await speakers.upsert({
+      id: 's-seal', code: 'SEAL-1', name: '封口测试', dialect: '粤语', region: '广州',
+      consentStatus: 'granted', consentScope: 'course', version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.upsert({
+      id: 'a-seal', title: '待封口录音', speakerId: 's-seal', ownerId: 'u1', dialect: '粤语',
+      durationSec: 0.1, sampleRate: 16000, channels: 1, mime: 'audio/wav',
+      waveformPeaks: [0.3], syllables: [{ start: 0, end: 0.1, label: 'x' }],
+      transcript: '你好', status: 'annotated', sensitive: false,
+      recordedAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    const PLAIN = Buffer.from('RIFF-seal-me-plaintext-audio');
+    await audio.attachFile('a-seal', PLAIN);
+
+    let row = await ds.getRepository(entities.AudioAsset).findOneBy({ id: 'a-seal' });
+    expect(row!.filePath).toBe('audio/a-seal.wav');
+    expect(row!.keyVersion).toBeNull();
+    const plainOnDisk = readFileSync(path.join(process.env.UPLOAD_DIR!, row!.filePath!));
+    expect(plainOnDisk.toString()).toBe('RIFF-seal-me-plaintext-audio');
+
+    // 撤回：返回封口数量，元数据与文件都应变化
+    const res = await speakers.revokeConsent('s-seal');
+    expect(res.sealed).toBe(1);
+    row = await ds.getRepository(entities.AudioAsset).findOneBy({ id: 'a-seal' });
+    expect(row!.sensitive).toBe(true);
+    expect(row!.status).toBe('restricted');
+    expect(row!.keyVersion).toBe(1);
+    expect(row!.filePath).toBe('audio/a-seal.wav.enc');
+
+    // 明文文件已删除，只剩密文；密文不含明文内容
+    const encPath = path.join(process.env.UPLOAD_DIR!, row!.filePath!);
+    expect(existsSync(encPath)).toBe(true);
+    expect(existsSync(path.join(process.env.UPLOAD_DIR!, 'audio/a-seal.wav'))).toBe(false);
+    const encOnDisk = readFileSync(encPath);
+    expect(encOnDisk.toString('latin1')).not.toContain('RIFF-seal-me-plaintext-audio');
+    // 密文不是明文（已加密）
+    expect(encOnDisk.subarray(0, 4).toString('latin1')).not.toBe('RIFF');
+
+    // 调查员经授权 + 解密仍可还原
+    const back = await audio.readMedia('a-seal', 'investigator');
+    expect(back.data.equals(PLAIN)).toBe(true);
+    // 学员/教练 403
+    await expect(audio.readMedia('a-seal', 'student')).rejects.toMatchObject({ status: 403 });
+    await expect(audio.readMedia('a-seal', 'coach')).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('同步推送撤回同样触发封口；重新授予 course 后恢复可分发（文件保留加密）', async () => {
+    // 同步通道撤回 s-seal（已在上一用例撤回，这里新建独立素材验证 sync 触发）
+    await speakers.upsert({
+      id: 's-syncseal', code: 'SYNCSEAL', name: '同步封口', dialect: '粤语', region: '广州',
+      consentStatus: 'granted', consentScope: 'course', version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.upsert({
+      id: 'a-syncseal', title: '同步待封口', speakerId: 's-syncseal', ownerId: 'u1', dialect: '粤语',
+      durationSec: 0.1, sampleRate: 16000, channels: 1, mime: 'audio/wav',
+      waveformPeaks: [0.3], syllables: [], status: 'annotated', sensitive: false,
+      recordedAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.attachFile('a-syncseal', Buffer.from('RIFF-sync-plain'));
+
+    // 通过 sync push 撤回
+    const pushRes = await sync.push(
+      { deviceId: 'd', speakers: [{ baseVersion: 1, entity: {
+        id: 's-syncseal', code: 'SYNCSEAL', name: '同步封口', dialect: '粤语', region: '广州',
+        consentStatus: 'revoked', consentScope: null, version: 2,
+        updatedAt: new Date(Date.now() + 1000).toISOString(),
+      } as any }] },
+      'investigator', 'u1',
+    );
+    expect(pushRes.accepted).toContain('s-syncseal');
+    const row = await ds.getRepository(entities.AudioAsset).findOneBy({ id: 'a-syncseal' });
+    expect(row!.filePath).toBe('audio/a-syncseal.wav.enc');
+    expect(row!.keyVersion).toBe(1);
+    expect(existsSync(path.join(process.env.UPLOAD_DIR!, 'audio/a-syncseal.wav'))).toBe(false);
+
+    // 重新授予 course：恢复可分发，文件仍加密
+    await speakers.grantConsent('s-syncseal', { scope: 'course', agreementText: '重新同意课程用途' });
+    const row2 = await ds.getRepository(entities.AudioAsset).findOneBy({ id: 'a-syncseal' });
+    expect(row2!.status).not.toBe('restricted');
+    expect(row2!.keyVersion).toBe(1); // 仍加密
+    const back = await audio.readMedia('a-syncseal', 'student');
+    expect(back.data.toString()).toBe('RIFF-sync-plain');
   });
 
   it('同步：推送新说话人 → 拉取可见；基于旧版本的二次推送产生冲突', async () => {

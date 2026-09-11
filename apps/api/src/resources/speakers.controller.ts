@@ -55,7 +55,9 @@ export class SpeakersController {
 
   @Post(':id/revoke')
   @Roles('investigator', 'admin')
-  revoke(@Param('id') id: string, @Req() req: { user: JwtPayload }) {
-    return this.service.revokeConsent(id, req.user);
+  async revoke(@Param('id') id: string, @Req() req: { user: JwtPayload }) {
+    // 撤回不仅改状态，还会把名下明文录音封口为 AES-GCM 密文
+    const { speaker, sealed } = await this.service.revokeConsent(id, req.user);
+    return { ...speaker, _sealedFiles: sealed };
   }
 }
