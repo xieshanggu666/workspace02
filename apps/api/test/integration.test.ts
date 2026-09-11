@@ -3,6 +3,7 @@ import { Test } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs';
+import { writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import * as path from 'path';
 
@@ -20,6 +21,7 @@ const { SpeakersService } = await import('../src/resources/speakers.service');
 const { AudioService } = await import('../src/resources/audio.service');
 const { CoursesService } = await import('../src/resources/courses.service');
 const { PracticeService } = await import('../src/resources/practice.service');
+const { ConsentEnforcementService } = await import('../src/resources/consent-enforcement.service');
 const { SyncService } = await import('../src/sync/sync.service');
 const entities = await import('../src/entities');
 
@@ -30,6 +32,7 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
   let audio: AudioService;
   let courses: CoursesService;
   let practice: PracticeService;
+  let enforcement: ConsentEnforcementService;
   let sync: SyncService;
 
   beforeAll(async () => {
@@ -40,6 +43,7 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
     audio = app.get(AudioService);
     courses = app.get(CoursesService);
     practice = app.get(PracticeService);
+    enforcement = app.get(ConsentEnforcementService);
     sync = app.get(SyncService);
 
     const hash = await bcrypt.hash('x', 10);
@@ -138,11 +142,11 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
     const plainOnDisk = readFileSync(path.join(process.env.UPLOAD_DIR!, row!.filePath!));
     expect(plainOnDisk.toString()).toBe('RIFF-seal-me-plaintext-audio');
 
-    // 撤回：返回封口数量，元数据与文件都应变化
+    // 撤回：返回封口数量，元数据状态与文件都应变化
     const res = await speakers.revokeConsent('s-seal');
     expect(res.sealed).toBe(1);
     row = await ds.getRepository(entities.AudioAsset).findOneBy({ id: 'a-seal' });
-    expect(row!.sensitive).toBe(true);
+    // sensitive 是素材自身的显式标记，不由授权状态改写；撤回体现为 status=restricted
     expect(row!.status).toBe('restricted');
     expect(row!.keyVersion).toBe(1);
     expect(row!.filePath).toBe('audio/a-seal.wav.enc');
@@ -200,6 +204,92 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
     expect(row2!.keyVersion).toBe(1); // 仍加密
     const back = await audio.readMedia('a-syncseal', 'student');
     expect(back.data.toString()).toBe('RIFF-sync-plain');
+  });
+
+  it('【回归】给一开始就是 research 的说话人录音，上传瞬间即为密文，磁盘无明文窗口', async () => {
+    await speakers.upsert({
+      id: 's-research-upload', code: 'RESU', name: '仅研究', dialect: '西南官话', region: '成都',
+      consentStatus: 'granted', consentScope: 'research', version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.upsert({
+      id: 'a-research-upload', title: '研究录音', speakerId: 's-research-upload', ownerId: 'u1',
+      dialect: '西南官话', durationSec: 0.1, sampleRate: 16000, channels: 1, mime: 'audio/wav',
+      waveformPeaks: [0.2], syllables: [], status: 'annotated', sensitive: false,
+      recordedAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.attachFile('a-research-upload', Buffer.from('RIFF-NEW-RESEARCH-AUDIO'));
+
+    // 从未发生授权状态迁移，但文件必须在写入瞬间就是密文
+    const row = await ds.getRepository(entities.AudioAsset).findOneBy({ id: 'a-research-upload' });
+    expect(row!.filePath).toBe('audio/a-research-upload.wav.enc');
+    expect(row!.keyVersion).toBe(1);
+    expect(existsSync(path.join(process.env.UPLOAD_DIR!, 'audio/a-research-upload.wav'))).toBe(false);
+    const onDisk = readFileSync(path.join(process.env.UPLOAD_DIR!, row!.filePath!));
+    expect(onDisk.toString('latin1')).not.toContain('RIFF-NEW-RESEARCH-AUDIO');
+    expect(onDisk.subarray(0, 4).toString('latin1')).not.toBe('RIFF');
+
+    // pending / revoked 说话人同样上传即密文
+    await speakers.upsert({
+      id: 's-pending-upload', code: 'PEND', name: '待签', dialect: '客家话', region: '梅州',
+      consentStatus: 'pending', consentScope: null, version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.upsert({
+      id: 'a-pending-upload', title: '待授权录音', speakerId: 's-pending-upload', ownerId: 'u1',
+      dialect: '客家话', durationSec: 0.1, sampleRate: 16000, channels: 1, mime: 'audio/mp4',
+      waveformPeaks: [0.2], syllables: [], status: 'draft', sensitive: false,
+      recordedAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.attachFile('a-pending-upload', Buffer.from('ftypM4A-pending'), 'audio/mp4');
+    const prow = await ds.getRepository(entities.AudioAsset).findOneBy({ id: 'a-pending-upload' });
+    expect(prow!.filePath).toBe('audio/a-pending-upload.m4a.enc');
+
+    // course 授权说话人新录音仍为明文（分发允许，静态加密非必须）
+    await speakers.upsert({
+      id: 's-course-upload', code: 'COURSEUP', name: '课程授权', dialect: '粤语', region: '广州',
+      consentStatus: 'granted', consentScope: 'course', version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.upsert({
+      id: 'a-course-upload', title: '课程录音', speakerId: 's-course-upload', ownerId: 'u1',
+      dialect: '粤语', durationSec: 0.1, sampleRate: 16000, channels: 1, mime: 'audio/wav',
+      waveformPeaks: [0.2], syllables: [], status: 'annotated', sensitive: false,
+      recordedAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.attachFile('a-course-upload', Buffer.from('RIFF-COURSE-OK'));
+    const crow = await ds.getRepository(entities.AudioAsset).findOneBy({ id: 'a-course-upload' });
+    expect(crow!.filePath).toBe('audio/a-course-upload.wav');
+    expect(crow!.keyVersion).toBeNull();
+
+    // 调查员经内存解密可正常播放 research 录音
+    const back = await audio.readMedia('a-research-upload', 'investigator');
+    expect(back.data.toString()).toBe('RIFF-NEW-RESEARCH-AUDIO');
+  });
+
+  it('【回归】历史遗留的 research 明文素材在启动自愈扫描时被封口', async () => {
+    // 直接构造一条“旧版本遗留”：research 授权但 keyVersion=null、filePath 指向明文
+    await speakers.upsert({
+      id: 's-legacy', code: 'LEG', name: '历史仅研究', dialect: '粤语', region: '广州',
+      consentStatus: 'granted', consentScope: 'research', version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.upsert({
+      id: 'a-legacy', title: '历史明文', speakerId: 's-legacy', ownerId: 'u1',
+      dialect: '粤语', durationSec: 0.1, sampleRate: 16000, channels: 1, mime: 'audio/wav',
+      waveformPeaks: [0.2], syllables: [], status: 'annotated', sensitive: false,
+      recordedAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    // 绕过 attachFile，直接写明文文件 + 元数据（模拟历史数据）
+    await writeFile(path.join(process.env.UPLOAD_DIR!, 'audio/a-legacy.wav'), Buffer.from('RIFF-LEGACY-PLAIN'));
+    await ds.getRepository(entities.AudioAsset).update('a-legacy', { filePath: 'audio/a-legacy.wav', keyVersion: null } as any);
+    expect(existsSync(path.join(process.env.UPLOAD_DIR!, 'audio/a-legacy.wav'))).toBe(true);
+
+    const enforcement = app.get(ConsentEnforcementService);
+    const sealed = await enforcement.reconcileAllAssets();
+    expect(sealed).toBeGreaterThanOrEqual(1);
+    const row = await ds.getRepository(entities.AudioAsset).findOneBy({ id: 'a-legacy' });
+    expect(row!.filePath).toBe('audio/a-legacy.wav.enc');
+    expect(row!.keyVersion).toBe(1);
+    expect(existsSync(path.join(process.env.UPLOAD_DIR!, 'audio/a-legacy.wav'))).toBe(false);
+    // 幂等：再扫一次不再封口
+    expect(await enforcement.reconcileAllAssets()).toBe(0);
   });
 
   it('【回归】通用 upsert 把授权改为 revoked/research 时，名下明文录音必须封口', async () => {

@@ -108,9 +108,14 @@ npm start            # Expo Dev Server；模拟器按 i / a，真机装 Expo Go 
    - 试听：`decryptToTempFile()` 用正规 `CipherParams` 解密到 cache 临时文件播放，播完即删；
    - 同步上传：**先在端上解密成临时明文再 multipart 上传**（绝不直传 `DENC1` 容器，
      否则服务端/播放器会把密文当音频），传完删除临时文件。是否在服务端静态加密由服务端决定。
-2. **服务端静态加密**：不可课程/公开分发的录音（`sensitive=true`、授权
-   pending/revoked、scope=research）以 AES-256-GCM 落盘
-   （`uploads/audio/*.wav.enc|*.m4a.enc`、`uploads/attempts/*`），密钥 =
+2. **服务端静态加密（落盘即密文，不依赖事后封口）**：新增统一判定
+   `mustEncryptAtRest()`——只要素材**显式 sensitive** 或说话人当前**不可课程/公开分发**
+   （`research` / `pending` / `revoked` / 说话人记录缺失），`attachFile()` 在文件
+   **写入磁盘的瞬间**就输出 AES-256-GCM 密文（`*.wav.enc|*.m4a.enc`），明文从未落盘，
+   因此不会进入备份或文件系统快照。这覆盖了「调查员给一个一开始就是 research 授权的
+   说话人正常录音并同步」——该场景不发生授权状态迁移，事后封口本来不会触发。
+   课程/公开授权的素材才以明文存储。
+   密钥 =
    `SHA256(主密钥 || "media:v1:" || assetId)`，一录一密、可轮换；GCM 标签防篡改。
 3. **授权闸门**：下载媒体时校验 `speaker.consentStatus` 与角色——
    `revoked` 仅 investigator/admin 可调档；`research`/`pending` 对教练与学员 403。
@@ -126,6 +131,9 @@ npm start            # Expo Dev Server；模拟器按 i / a，真机装 Expo Go 
      新建即不可分发时（先录音后补授权）同样封口；
    - 操作幂等，已加密素材跳过；文件尚未上传时只封元数据；
      sync 通道在事务提交后做文件封口（避免脏读），并用保存前快照判断状态变化；
+   - **启动自愈**：`ConsentEnforcementService.onModuleInit()` 调
+     `reconcileAllAssets()` 扫描全部素材，把旧版本遗留在磁盘上的不可分发明文
+     （如旧版给 research 说话人录的明文）在服务启动时批量改为密文，幂等；
    - `/revoke` 接口返回 `_sealedFiles`（本次新加密文件数）；
    - 迁移回 course/public 时元数据恢复可分发，文件**保留加密**（下载时按 keyVersion 内存解密）；
    - 种子数据中 research 范围的成都话以 `.wav.enc` 落盘，与待签/撤回素材一致。
@@ -236,7 +244,7 @@ LWW 比较的才是真实编辑先后而非收货时间；仅当客户端缺时�
 ## 七、测试
 
 ```bash
-npm test   # shared 28 例 + api 35 例 + mobile 19 例，共 82 例
+npm test   # shared 31 例 + api 37 例 + mobile 19 例，共 87 例
 ```
 
 API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
@@ -248,9 +256,11 @@ API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
   DB 被直接写入穿越路径时读取守卫抛错；教练不能降级敏感素材；
 - 未来时间戳（2999 年）被钳制、全服游标不跳未来、持未来游标的设备下次同步自愈、
   毒记录之后的正常数据仍能用旧游标拉到、未来版无法在 LWW 中永远压过合法编辑；
-- 撤回/收窄授权把明文文件真正封口为 AES-GCM 密文并删除明文；所有写通道（通用
-  upsert、/revoke、/consent、sync push）共用 consentTransition 判定，无一遗漏；
-  调查员解密可读、学员/教练 403；重新授权后恢复可分发且文件保留加密；research 播种即加密。
+- 给一开始就是 research/pending/revoked 的说话人新录音：上传瞬间即 GCM 密文，
+  磁盘从无明文窗口；course/public 素材仍明文；启动自愈把历史 research 明文批量封口；
+- 撤回/收窄授权的所有写通道（通用 upsert、/revoke、/consent、sync push）共用
+  consentTransition 判定，无一遗漏；调查员解密可读、学员/教练 403；重新授权后
+  恢复可分发且文件保留加密；research 播种即加密；
 - 离线推送新建 → 拉取可见；旧基线推送产生 `version_conflict`；
 - 课程整课保存后移除条目被软删；
 - 学员 A/B 互改 attempt、互传录音、互看批注、全量同步互相可见性全部按身份隔离；

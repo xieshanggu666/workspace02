@@ -14,6 +14,24 @@ export function isDistributable(s: ConsentState | null | undefined): boolean {
   );
 }
 
+/**
+ * 录音在服务端落盘时是否必须加密。
+ *
+ * 关键：这与“授权状态何时发生变化”无关——只要素材当前不属于可课程/公开
+ * 分发（research / pending / revoked / 说话人记录缺失），或者被显式标记
+ * sensitive，文件写入磁盘的那一刻就必须是密文，避免明文进入备份/快照。
+ * 之前仅在授权“变更”时才封口，给「一开始就是 research 的说话人新录音」
+ * 留下了明文落盘窗口。
+ */
+export function mustEncryptAtRest(ctx: {
+  consentStatus?: ConsentState['consentStatus'];
+  consentScope?: ConsentState['consentScope'];
+  sensitive?: boolean;
+}): boolean {
+  if (ctx.sensitive) return true;
+  return !isDistributable({ consentStatus: ctx.consentStatus, consentScope: ctx.consentScope });
+}
+
 export type ConsentAction = 'none' | 'seal' | 'restore';
 
 /**

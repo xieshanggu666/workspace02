@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { consentTransition, isDistributable } from './consent-transition';
+import { consentTransition, isDistributable, mustEncryptAtRest } from './consent-transition';
 
 describe('isDistributable', () => {
   it('只有 granted + course/public 可分发', () => {
@@ -58,5 +58,23 @@ describe('consentTransition', () => {
 
   it('新建即 course/public 不动作', () => {
     expect(consentTransition(null, { consentStatus: 'granted', consentScope: 'course' })).toBe('none');
+  });
+});
+
+describe('mustEncryptAtRest —— 落盘即密文', () => {
+  it('course/public 且非 sensitive：不强制加密', () => {
+    expect(mustEncryptAtRest({ consentStatus: 'granted', consentScope: 'course' })).toBe(false);
+    expect(mustEncryptAtRest({ consentStatus: 'granted', consentScope: 'public' })).toBe(false);
+  });
+
+  it('research / pending / revoked / 无授权：必须加密（即使从未发生状态变更）', () => {
+    expect(mustEncryptAtRest({ consentStatus: 'granted', consentScope: 'research' })).toBe(true);
+    expect(mustEncryptAtRest({ consentStatus: 'pending' })).toBe(true);
+    expect(mustEncryptAtRest({ consentStatus: 'revoked' })).toBe(true);
+    expect(mustEncryptAtRest({})).toBe(true);
+  });
+
+  it('显式 sensitive 恒加密', () => {
+    expect(mustEncryptAtRest({ consentStatus: 'granted', consentScope: 'course', sensitive: true })).toBe(true);
   });
 });

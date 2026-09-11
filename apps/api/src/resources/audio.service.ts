@@ -8,7 +8,7 @@ import { mkdir, writeFile, readFile } from 'fs/promises';
 import * as path from 'path';
 import { AudioAsset, Speaker } from '../entities';
 import type { AudioAssetDto, AppRole } from '@dialect/shared';
-import { canAccessMedia, mediaDenyReason, sanitizeClientTime } from '@dialect/shared';
+import { canAccessMedia, mediaDenyReason, sanitizeClientTime, mustEncryptAtRest } from '@dialect/shared';
 import { MapperService } from './mapper.service';
 import { MediaCryptoService } from '../media/media-crypto.service';
 import { resolveWithinStorage } from '../media/path-guard';
@@ -169,9 +169,21 @@ export class AudioService implements OnModuleInit {
     return this.repo.save(entity);
   }
 
+  /**
+   * 上传/替换录音二进制。
+   * 是否加密在文件落盘的瞬间按「说话人授权 + 素材敏感标记」决定：
+   * 只要不是可课程/公开分发（research/pending/revoked/无说话人）或 sensitive，
+   * 就直接写密文——明文从未存在于磁盘，杜绝经备份/快照泄露。
+   */
   async attachFile(id: string, data: Buffer, mime?: string): Promise<AudioAsset> {
     const asset = await this.getEntity(id);
-    const keyVersion = asset.sensitive ? Math.max(1, asset.keyVersion ?? 1) : null;
+    const speaker = await this.speakers.findOneBy({ id: asset.speakerId });
+    const encryptAtRest = mustEncryptAtRest({
+      sensitive: asset.sensitive,
+      consentStatus: speaker?.consentStatus,
+      consentScope: speaker?.consentScope,
+    });
+    const keyVersion = encryptAtRest ? Math.max(1, asset.keyVersion ?? 1) : null;
     const payload = keyVersion ? this.crypto.encrypt(data, asset.id, keyVersion) : data;
     const rawExt = mime === 'audio/mp4' || mime === 'audio/m4a' || mime === 'audio/aac'
       ? 'm4a'
