@@ -12,6 +12,16 @@ export const UPDATED_AT_COLUMN: ColumnOptions = IS_SQLITE
   ? { type: 'datetime', default: () => 'CURRENT_TIMESTAMP' }
   : { type: 'datetime', precision: 3, default: () => 'CURRENT_TIMESTAMP(3)' };
 
+/**
+ * 服务端提交时间：与客户端上报的 updatedAt 严格区分。
+ *  - updatedAt       = 「编辑实际发生的时间」（离线 LWW 决胜用，需清洗）
+ *  - serverUpdatedAt = 「服务器接受写入的时间」（只由服务端盖章，同步游标唯一依据）
+ * 这样客户端伪造 2999 年也推不高游标。
+ */
+export const SERVER_UPDATED_AT_COLUMN: ColumnOptions = IS_SQLITE
+  ? { type: 'datetime', default: () => 'CURRENT_TIMESTAMP' }
+  : { type: 'datetime', precision: 3, default: () => 'CURRENT_TIMESTAMP(3)' };
+
 export const NULLABLE_DATETIME_COLUMN: ColumnOptions = IS_SQLITE
   ? { type: 'datetime', nullable: true }
   : { type: 'datetime', precision: 3, nullable: true };
@@ -37,6 +47,10 @@ export abstract class SyncEntity {
 
   @Column(UPDATED_AT_COLUMN as any)
   updatedAt: string;
+
+  /** 服务端提交时间（同步游标唯一依据），由 TimestampSubscriber 强制盖章 */
+  @Column(SERVER_UPDATED_AT_COLUMN as any)
+  serverUpdatedAt: Date;
 
   @Column(NULLABLE_DATETIME_COLUMN as any)
   deletedAt: Date | null;

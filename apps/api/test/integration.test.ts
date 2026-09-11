@@ -532,4 +532,101 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
     expect(back.mime).toBe('audio/mp4');
     expect(back.data.toString()).toBe('ftypM4A-binary-aac');
   });
+
+  // ============ 时间戳 / 同步游标毒化防护 ============
+
+  it('未来 updatedAt 被钳制，且无法把全服同步游标推到未来', async () => {
+    // 学员推送一条 2999 年的 attempt
+    await sync.push(
+      {
+        deviceId: 'evil-clock',
+        attempts: [{
+          baseVersion: 0,
+          entity: {
+            id: 'att-future-1', studentId: 'stu-a', courseItemId: 'i1', audioId: 'a2',
+            durationSec: 1, waveformPeaks: [], score: null,
+            createdAt: '2999-01-01T00:00:00.000Z',
+            version: 1, updatedAt: '2999-01-01T00:00:00.000Z',
+          } as any,
+        }],
+      },
+      'student',
+      'stu-a',
+    );
+
+    const row = await ds.getRepository(entities.PracticeAttempt).findOneBy({ id: 'att-future-1' });
+    // 业务/编辑时间被钳到 now+5min 附近，绝不是 2999 年
+    expect(new Date(row!.updatedAt).getUTCFullYear()).toBeLessThan(2999);
+    expect(new Date(row!.updatedAt).getTime()).toBeLessThan(Date.now() + 6 * 60_000);
+    // serverUpdatedAt 是服务器时钟（今年）
+    expect(new Date((row as any).serverUpdatedAt).getUTCFullYear()).toBe(new Date().getUTCFullYear());
+
+    // 全量游标不能跳到未来：应为服务器当前时间量级
+    const pull = await sync.pull(undefined, 'student', 'stu-a');
+    const cursorMs = Date.parse(pull.cursor);
+    expect(cursorMs).toBeLessThan(Date.now() + 60_000);
+    expect(cursorMs).toBeGreaterThan(Date.now() - 3_600_000);
+
+    // 关键：毒记录之后，其他学员仍能用「毒记录之前」的旧游标增量拉到它（拉取不空）
+    const oldCursor = new Date(Date.now() - 60_000).toISOString();
+    const lateStudent = await sync.pull(oldCursor, 'student', 'stu-a');
+    expect(lateStudent.attempts.some((a) => a.id === 'att-future-1')).toBe(true);
+
+    // 毒记录之后再产生的正常数据，同样能被「毒记录之前」的游标拉到（系统未坏）
+    await new Promise((r) => setTimeout(r, 5));
+    await sync.push(
+      { deviceId: 'normal', attempts: [{ baseVersion: 0, entity: {
+        id: 'att-after-poison', studentId: 'stu-a', courseItemId: 'i1', audioId: 'a2',
+        durationSec: 1, waveformPeaks: [], score: null,
+        createdAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+      } as any }] },
+      'student', 'stu-a',
+    );
+    const pullAgain = await sync.pull(oldCursor, 'student', 'stu-a');
+    expect(pullAgain.attempts.some((a) => a.id === 'att-after-poison')).toBe(true);
+  });
+
+  it('已中毒的游标（2999年）在 pull 时被钳到服务器当前，设备自愈', async () => {
+    // 先放一条正常数据
+    await speakers.upsert({
+      id: 's-cursor', code: 'C-X', name: '游标测试', dialect: '粤语', region: '广州',
+      consentStatus: 'granted', consentScope: 'course', version: 1,
+      updatedAt: new Date().toISOString(),
+    } as any);
+    // 客户端带着未来游标来拉
+    const poisoned = '2999-01-01T00:00:00.000Z';
+    const healed = await sync.pull(poisoned, 'investigator', 'u1');
+    const cursorMs = Date.parse(healed.cursor);
+    expect(cursorMs).toBeLessThan(Date.now() + 6 * 60_000);
+    expect(cursorMs).toBeGreaterThan(Date.now() - 3_600_000);
+    // 返回的游标不晚于服务器时钟
+    expect(cursorMs).toBeLessThanOrEqual(Date.now() + 5 * 60_000);
+  });
+
+  it('LWW：未来时间戳的记录不会永远压过后续合法编辑', async () => {
+    // 同一条记录，第一次用未来时间推，再用正常（更晚的真实）时间改
+    await sync.push(
+      { deviceId: 'd1', speakers: [{ baseVersion: 0, entity: {
+        id: 's-lww', code: 'LWW-1', name: '未来版', dialect: '粤语', region: '广州',
+        consentStatus: 'granted', consentScope: 'course', version: 1,
+        updatedAt: '2999-01-01T00:00:00Z',
+      } as any }] },
+      'investigator', 'u1',
+    );
+    // 另一设备基于服务端版本用正常时间再改（时间更晚于被钳制后的时间）
+    const row = await ds.getRepository(entities.Speaker).findOneBy({ id: 's-lww' });
+    await new Promise((r) => setTimeout(r, 5));
+    const res = await sync.push(
+      { deviceId: 'd2', speakers: [{ baseVersion: 1, entity: {
+        id: 's-lww', code: 'LWW-1', name: '合法新版', dialect: '粤语', region: '广州',
+        consentStatus: 'granted', consentScope: 'course', version: 2,
+        updatedAt: new Date(Date.now() + 10_000).toISOString(),
+      } as any }] },
+      'investigator', 'u1',
+    );
+    expect(res.accepted).toContain('s-lww');
+    const final = await ds.getRepository(entities.Speaker).findOneBy({ id: 's-lww' });
+    expect(final!.name).toBe('合法新版');
+    expect(row!.updatedAt).toBeTruthy();
+  });
 });

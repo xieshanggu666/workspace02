@@ -184,6 +184,6 @@ export class CoursesService {
   }
 
   async softDelete(id: string): Promise<void> {
-    await this.courses.update(id, { deletedAt: new Date(), updatedAt: new Date() as any });
+    await this.courses.update(id, { deletedAt: new Date(), updatedAt: new Date() as any, serverUpdatedAt: new Date() });
   }
 }

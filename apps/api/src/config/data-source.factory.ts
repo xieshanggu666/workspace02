@@ -1,5 +1,6 @@
 import { TypeOrmModuleOptions } from '@nestjs/typeorm';
 import { ALL_ENTITIES } from '../entities';
+import { TimestampSubscriber } from '../media/timestamp.subscriber';
 
 /**
  * TypeORM 数据源工厂。
@@ -19,6 +20,7 @@ export function buildDataSourceOptions(cfg: {
       synchronize: true,
       logging: false,
       entities: ALL_ENTITIES,
+      subscribers: [TimestampSubscriber],
     };
   }
   return {
@@ -34,5 +36,6 @@ export function buildDataSourceOptions(cfg: {
     timezone: '+00:00',
     logging: false,
     entities: ALL_ENTITIES,
+    subscribers: [TimestampSubscriber],
   };
 }

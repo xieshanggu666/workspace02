@@ -8,7 +8,7 @@ import { mkdir, writeFile, readFile } from 'fs/promises';
 import * as path from 'path';
 import { AudioAsset, Speaker } from '../entities';
 import type { AudioAssetDto, AppRole } from '@dialect/shared';
-import { canAccessMedia, mediaDenyReason } from '@dialect/shared';
+import { canAccessMedia, mediaDenyReason, sanitizeClientTime } from '@dialect/shared';
 import { MapperService } from './mapper.service';
 import { MediaCryptoService } from '../media/media-crypto.service';
 import { resolveWithinStorage } from '../media/path-guard';
@@ -163,7 +163,7 @@ export class AudioService implements OnModuleInit {
     entity.filePath = entity.filePath ?? null;
     if (!entity.keyVersion) entity.keyVersion = null;
 
-    entity.recordedAt = new Date(dto.recordedAt) as any;
+    entity.recordedAt = sanitizeClientTime(dto.recordedAt) as any;
     entity.version = existing ? existing.version + 1 : Math.max(1, dto.version);
     entity.updatedAt = new Date() as any;
     return this.repo.save(entity);
@@ -232,6 +232,6 @@ export class AudioService implements OnModuleInit {
   }
 
   async softDelete(id: string): Promise<void> {
-    await this.repo.update(id, { deletedAt: new Date(), updatedAt: new Date() as any });
+    await this.repo.update(id, { deletedAt: new Date(), updatedAt: new Date() as any, serverUpdatedAt: new Date() });
   }
 }

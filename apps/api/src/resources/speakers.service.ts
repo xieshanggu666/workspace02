@@ -4,6 +4,7 @@ import { IsNull, Repository } from 'typeorm';
 import { createHash } from 'crypto';
 import { Speaker } from '../entities';
 import type { ConsentScope, ConsentStatus, SpeakerDto } from '@dialect/shared';
+import { sanitizeClientTime } from '@dialect/shared';
 import { MapperService } from './mapper.service';
 import { JwtPayload } from '../auth/auth.guard';
 
@@ -45,14 +46,14 @@ export class SpeakersService {
       notes: dto.notes ?? null,
       deviceId: deviceId ?? dto.deviceId ?? entity.deviceId,
     });
-    entity.consentSignedAt = dto.consentSignedAt ? new Date(dto.consentSignedAt) : null;
+    entity.consentSignedAt = dto.consentSignedAt ? sanitizeClientTime(dto.consentSignedAt) : null;
     entity.version = existing ? existing.version + 1 : Math.max(1, dto.version);
     entity.updatedAt = new Date() as any;
     return this.repo.save(entity);
   }
 
   async softDelete(id: string): Promise<void> {
-    await this.repo.update(id, { deletedAt: new Date(), updatedAt: new Date() as any });
+    await this.repo.update(id, { deletedAt: new Date(), updatedAt: new Date() as any, serverUpdatedAt: new Date() });
   }
 
   /** 记录一次电子/纸质授权签署 */

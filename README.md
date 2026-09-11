@@ -133,13 +133,26 @@ npm start            # Expo Dev Server；模拟器按 i / a，真机装 Expo Go 
 
 所有实体带 `id(客户端 UUID) / version / deviceId / updatedAt / deletedAt(软删墓碑)`。
 
-- `GET /api/sync/pull?cursor=<ISO>`：返回 `updatedAt > cursor` 的全部实体（含墓碑）。
+- `GET /api/sync/pull?cursor=<ISO>`：以**服务端提交时间** `serverUpdatedAt`（只由
+  服务端盖章，DTO 里不暴露、客户端无法注入）为游标返回其后的全部实体（含墓碑）。
 - `POST /api/sync/push`：单事务内逐条走 `mergeRecord`：
   - `baseVersion == server.version` → 快进，version+1（无内容变化则不提版本）；
   - `baseVersion < server.version`（两端都改）→ 比较 `updatedAt`，新者胜（LWW），
     旧者返回 `version_conflict`；
   - 服务端已删 → `deleted` 冲突，普通同步不能复活。
 - 推送按角色限制（学员不能推 speakers/课程，教练不能推 speakers 等）。
+
+**时间戳不可被客户端毒化**（防"未来游标"攻击）：
+
+- 游标只认服务端时钟：实体新增 `serverUpdatedAt`，由 TypeORM 订阅器
+  `TimestampSubscriber` 在任何 insert/update 强制盖章（QueryBuilder 软删路径显式盖章），
+  客户端推送 2999 年的记录也不会抬高任何人的游标；
+- 客户端时间一律入口钳制 `sanitizeClientTime()`：超过服务器时钟 +5 分钟（容差）的未来
+  时间钳到 `now+skew`，无法解析/异常早的时间退化为 now——`updatedAt`（LWW）、
+  `recordedAt`、`createdAt`、`consentSignedAt` 全部覆盖，REST 与 sync 两个通道都做；
+- pull 对入站游标同样钳到 `now+skew`，已被旧版本毒化（持未来游标）的设备下一次同步即自愈；
+- 移动端本地盖戳也调用同一清洗函数，设备时钟被拨快时自己产生的记录也不会进 outbox 毒化。
+  纯函数与测试见 `packages/shared/src/time-sanitize.ts`。
 
 **未推送的本地编辑绝不被 pull 覆盖**（移动端三道保证，`apps/mobile/src/store.ts` / `sync.ts`）：
 
@@ -207,7 +220,7 @@ LWW 比较的才是真实编辑先后而非收货时间；仅当客户端缺时�
 ## 七、测试
 
 ```bash
-npm test   # shared 15 例 + api 29 例 + mobile 19 例，共 63 例
+npm test   # shared 21 例 + api 32 例 + mobile 19 例，共 72 例
 ```
 
 API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
@@ -217,6 +230,8 @@ API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
 - research 素材编入课程在 REST 与 sync 双通道 403；混合脏数据课程对学员过滤；
 - 教练注入 `filePath=../../.env`（相对/绝对路径）无法写库、下载仍返回原音频；
   DB 被直接写入穿越路径时读取守卫抛错；教练不能降级敏感素材；
+- 未来时间戳（2999 年）被钳制、全服游标不跳未来、持未来游标的设备下次同步自愈、
+  毒记录之后的正常数据仍能用旧游标拉到、未来版无法在 LWW 中永远压过合法编辑。
 - 离线推送新建 → 拉取可见；旧基线推送产生 `version_conflict`；
 - 课程整课保存后移除条目被软删；
 - 学员 A/B 互改 attempt、互传录音、互看批注、全量同步互相可见性全部按身份隔离；

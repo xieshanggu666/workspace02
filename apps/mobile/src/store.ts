@@ -3,9 +3,9 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type {
   UserDto, SpeakerDto, AudioAssetDto, CourseDto, CourseItemDto,
-  PracticeAttemptDto, AnnotationDto, Syncable, SyncConflict,
+  PracticeAttemptDto, AnnotationDto, Syncable, SyncConflict, SyncPullResult,
 } from '@dialect/shared';
-import type { SyncPullResult } from '@dialect/shared';
+import { sanitizeClientIso } from '@dialect/shared';
 
 export type Bucket =
   | 'speakers'
@@ -103,9 +103,12 @@ export const useStore = create<DataState>()(
         const state = get();
         const table = state[bucket] as Record<string, Syncable>;
         const previous = table[entity.id];
+        // 本地盖戳同样做未来时间钳制：设备时钟被调到未来时，
+        // 自己产生的记录也不能毒化服务端游标或在 LWW 中永远压过别人。
+        const stamp = sanitizeClientIso(new Date().toISOString());
         const stamped: Syncable = {
           ...entity,
-          updatedAt: new Date().toISOString(),
+          updatedAt: stamp,
           version: previous ? Math.max(previous.version, entity.version || 1) : entity.version || 1,
         };
         // baseVersion 必须是「上次与服务器同步时」的版本：

@@ -8,6 +8,7 @@ import { mkdir, readFile, writeFile } from 'fs/promises';
 import * as path from 'path';
 import { PracticeAttempt, Annotation, AudioAsset, Speaker } from '../entities';
 import type { AnnotationDto, PracticeAttemptDto } from '@dialect/shared';
+import { sanitizeClientTime } from '@dialect/shared';
 import { MapperService } from './mapper.service';
 import { resolveWithinStorage } from '../media/path-guard';
 
@@ -75,7 +76,7 @@ export class PracticeService implements OnModuleInit {
     if (!a) {
       a = this.attempts.create({
         id: dto.id,
-        createdAt: new Date(dto.createdAt),
+        createdAt: sanitizeClientTime(dto.createdAt),
         version: Math.max(1, dto.version),
       });
     } else {

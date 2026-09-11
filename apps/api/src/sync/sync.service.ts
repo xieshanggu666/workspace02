@@ -4,7 +4,7 @@ import { DataSource, In, Repository } from 'typeorm';
 import {
   User, Speaker, AudioAsset, Course, CourseItem, PracticeAttempt, Annotation,
 } from '../entities';
-import { mergeRecord, canAccessMedia, canUseInCourse, type EntityBucket } from '@dialect/shared';
+import { mergeRecord, canAccessMedia, canUseInCourse, sanitizeClientTime, CLOCK_SKEW_MS, type EntityBucket } from '@dialect/shared';
 import type {
   SyncPullResult, SyncPushPayload, SyncPushResult, Syncable,
 } from '@dialect/shared';
@@ -111,8 +111,22 @@ export class SyncService {
     userId: string,
   ): Promise<SyncPullResult> {
     const epoch = new Date(0).toISOString();
+
+    // 入站游标钳制：游标由服务端 serverUpdatedAt 产生；若客户端已被旧版毒化
+    // （持一个未来时间），将其截到「服务器当前时间 + 容差」，让该设备本轮自愈，
+    // 同时不允许游标超过服务器时钟（防止拉空）。
+    const now = Date.now();
+    let sinceMs = 0;
+    if (cursor) {
+      const parsed = Date.parse(cursor);
+      if (Number.isFinite(parsed)) {
+        sinceMs = Math.min(parsed, now + CLOCK_SKEW_MS);
+      }
+    }
+    const since = new Date(sinceMs);
+
     const result: SyncPullResult = {
-      cursor: cursor || epoch,
+      cursor: sinceMs ? new Date(sinceMs).toISOString() : epoch,
       users: [], speakers: [], audio: [], courses: [], courseItems: [],
       attempts: [], annotations: [],
     };
@@ -144,11 +158,11 @@ export class SyncService {
     }
 
     for (const [name, cfg] of Object.entries(this.buckets) as Array<[EntityBucket, BucketConfig<any>]>) {
-      const since = cursor ? new Date(cursor) : new Date(0);
+      // 游标只由服务端提交时间驱动，客户端无法通过伪造 updatedAt 推高它
       const rows = await cfg.repo
         .createQueryBuilder('e')
-        .where('e.updatedAt > :since', { since })
-        .orderBy('e.updatedAt', 'ASC')
+        .where('e.serverUpdatedAt > :since', { since })
+        .orderBy('e.serverUpdatedAt', 'ASC')
         .getMany();
 
       let dtos = rows.map((r) => cfg.toDto(r));
@@ -190,7 +204,7 @@ export class SyncService {
       }
       (result as any)[name] = dtos;
       for (const r of rows) {
-        const t = new Date((r as any).updatedAt).toISOString();
+        const t = new Date((r as any).serverUpdatedAt).toISOString();
         if (t > result.cursor) result.cursor = t;
       }
     }
@@ -244,6 +258,16 @@ export class SyncService {
             if (serverRow.sensitive) (clientEntity as any).sensitive = true;
           }
 
+          // 时间戳清洗：拒绝未来时间毒化 LWW 与（历史版本的）游标。
+          // updatedAt 是「编辑实际发生时间」，钳到 now+skew；业务日期列同样钳制。
+          const serverNow = new Date();
+          const ce = clientEntity as any;
+          if (ce.updatedAt) ce.updatedAt = sanitizeClientTime(ce.updatedAt, serverNow);
+          for (const df of cfg.dateFields) {
+            if (ce[df]) ce[df] = sanitizeClientTime(ce[df], serverNow);
+          }
+          if (ce.deletedAt) ce.deletedAt = sanitizeClientTime(ce.deletedAt, serverNow);
+
           const serverDto = serverRow ? cfg.toDto(serverRow) : undefined;
 
           const outcome = mergeRecord({
@@ -286,9 +310,9 @@ export class SyncService {
           }
           target.version = outcome.newVersion;
           target.deviceId = payload.deviceId || won.deviceId || target.deviceId || null;
-          // LWW 语义要求 updatedAt 表示「最后一次编辑发生的时间」，必须随记录传播；
-          // 若用服务器收货时间覆盖，离线设备带真实编辑时间的写入会被错误排序。
-          // 仅在客户端缺时间戳时退回服务器时钟。
+          // updatedAt 表示「最后一次编辑发生的时间」，随记录传播（供 LWW）；
+          // 但已经过上面的 sanitizeClientTime 清洗，未来时间被钳到 now+skew。
+          // serverUpdatedAt 由订阅器盖服务器时钟，是同步游标的唯一依据。
           target.updatedAt = (won.updatedAt ? new Date(won.updatedAt) : new Date()) as any;
           if (won.deletedAt) target.deletedAt = new Date(won.deletedAt);
           await repo.save(target);
