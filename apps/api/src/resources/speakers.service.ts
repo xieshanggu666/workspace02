@@ -4,7 +4,7 @@ import { IsNull, Repository } from 'typeorm';
 import { createHash } from 'crypto';
 import { Speaker } from '../entities';
 import type { ConsentScope, ConsentStatus, SpeakerDto } from '@dialect/shared';
-import { sanitizeClientTime } from '@dialect/shared';
+import { sanitizeClientTime, consentTransition } from '@dialect/shared';
 import { MapperService } from './mapper.service';
 import { ConsentEnforcementService } from './consent-enforcement.service';
 import { JwtPayload } from '../auth/auth.guard';
@@ -32,8 +32,17 @@ export class SpeakersService {
     return s;
   }
 
+  /**
+   * 通用说话人 upsert（POST/PUT /speakers 与现场建档共用）。
+   * 关键：授权状态/范围的任何变化都必须触发与 /revoke、/consent 一致的收口，
+   * 不能因为走的是「通用更新接口」就绕过文件封口。
+   */
   async upsert(dto: SpeakerDto, deviceId?: string): Promise<Speaker> {
     const existing = await this.repo.findOneBy({ id: dto.id });
+    const before = existing
+      ? { consentStatus: existing.consentStatus, consentScope: existing.consentScope }
+      : null;
+
     const entity = existing ?? this.repo.create({ id: dto.id });
     Object.assign(entity, {
       code: dto.code,
@@ -51,7 +60,17 @@ export class SpeakersService {
     entity.consentSignedAt = dto.consentSignedAt ? sanitizeClientTime(dto.consentSignedAt) : null;
     entity.version = existing ? existing.version + 1 : Math.max(1, dto.version);
     entity.updatedAt = new Date() as any;
-    return this.repo.save(entity);
+    const saved = await this.repo.save(entity);
+
+    // 统一收口：撤回 / 范围缩减 / 新建即不可分发 → 封口；恢复 course/public → 还原
+    const action = consentTransition(before, {
+      consentStatus: entity.consentStatus,
+      consentScope: entity.consentScope,
+    });
+    if (action === 'seal') await this.enforcement.sealSpeakerAssets(dto.id);
+    else if (action === 'restore') await this.enforcement.restoreSpeakerAssets(dto.id);
+
+    return saved;
   }
 
   async softDelete(id: string): Promise<void> {
@@ -67,23 +86,29 @@ export class SpeakersService {
     if (!body.scope || !body.agreementText?.trim()) {
       throw new BadRequestException('授权范围与协议全文必填');
     }
+    const existingBeforeGrant = {
+      consentStatus: s.consentStatus,
+      consentScope: s.consentScope,
+    };
     const hash = `sha256:${createHash('sha256')
       .update(`${body.agreementText}||${s.code}||${body.scope}`)
       .digest('hex')}`;
     s.consentStatus = 'granted' as ConsentStatus;
     s.consentScope = body.scope;
     s.consentHash = hash;
-    s.consentSignedAt = new Date(body.signedAt || Date.now());
+    s.consentSignedAt = sanitizeClientTime(body.signedAt || new Date().toISOString());
+    const before = {
+      consentStatus: existingBeforeGrant.consentStatus,
+      consentScope: existingBeforeGrant.consentScope,
+    };
     s.version += 1;
     s.updatedAt = new Date() as any;
     const saved = await this.repo.save(s);
-    // 范围收窄到 research（不再允许课程/公开分发）：立即封口
-    if (body.scope === 'research') {
-      await this.enforcement.sealSpeakerAssets(id);
-    } else if (body.scope === 'course' || body.scope === 'public') {
-      // 从撤回/research 恢复：元数据恢复可分发（已加密文件保留加密）
-      await this.enforcement.restoreSpeakerAssets(id);
-    }
+
+    const action = consentTransition(before, { consentStatus: 'granted', consentScope: body.scope });
+    if (action === 'seal') await this.enforcement.sealSpeakerAssets(id);
+    else if (action === 'restore') await this.enforcement.restoreSpeakerAssets(id);
+
     return this.mapper.speaker(saved);
   }
 
@@ -103,6 +128,7 @@ export class SpeakersService {
     s.version += 1;
     s.updatedAt = new Date() as any;
     const saved = await this.repo.save(s);
+    // 撤回后必然不可分发：直接封口（幂等，已加密素材跳过）
     const sealed = await this.enforcement.sealSpeakerAssets(id);
     return { speaker: this.mapper.speaker(saved), sealed };
   }

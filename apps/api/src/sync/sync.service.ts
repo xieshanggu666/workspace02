@@ -4,7 +4,7 @@ import { DataSource, In, Repository } from 'typeorm';
 import {
   User, Speaker, AudioAsset, Course, CourseItem, PracticeAttempt, Annotation,
 } from '../entities';
-import { mergeRecord, canAccessMedia, canUseInCourse, sanitizeClientTime, CLOCK_SKEW_MS, type EntityBucket } from '@dialect/shared';
+import { mergeRecord, canAccessMedia, canUseInCourse, sanitizeClientTime, CLOCK_SKEW_MS, consentTransition, type EntityBucket } from '@dialect/shared';
 import type {
   SyncPullResult, SyncPushPayload, SyncPushResult, Syncable,
 } from '@dialect/shared';
@@ -327,25 +327,16 @@ export class SyncService {
           if (won.deletedAt) target.deletedAt = new Date(won.deletedAt);
           await repo.save(target);
 
-          // 同步通道的授权状态变化同样触发封口/恢复，不能只靠 REST
+          // 同步通道的授权状态变化同样触发封口/恢复，与 REST 通用更新共用判定
           if (name === 'speakers') {
-            const before = beforeSnapshot.get(won.id);
+            const before = beforeSnapshot.get(won.id) ?? null;
             const after = target as Speaker;
-            const becameRevoked = after.consentStatus === 'revoked' && before?.consentStatus !== 'revoked';
-            const narrowedToResearch =
-              after.consentStatus === 'granted' &&
-              after.consentScope === 'research' &&
-              before?.consentScope !== 'research';
-            const restoredDistributable =
-              after.consentStatus === 'granted' &&
-              (after.consentScope === 'course' || after.consentScope === 'public') &&
-              (before?.consentStatus !== 'granted' ||
-                (before.consentScope !== 'course' && before.consentScope !== 'public'));
-            if (becameRevoked || narrowedToResearch) {
-              sealAfterCommit.add(after.id);
-            } else if (restoredDistributable) {
-              restoreAfterCommit.add(after.id);
-            }
+            const action = consentTransition(before, {
+              consentStatus: after.consentStatus,
+              consentScope: after.consentScope,
+            });
+            if (action === 'seal') sealAfterCommit.add(after.id);
+            else if (action === 'restore') restoreAfterCommit.add(after.id);
           }
 
           accepted.push(won.id);

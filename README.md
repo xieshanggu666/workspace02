@@ -114,15 +114,21 @@ npm start            # Expo Dev Server；模拟器按 i / a，真机装 Expo Go 
    `SHA256(主密钥 || "media:v1:" || assetId)`，一录一密、可轮换；GCM 标签防篡改。
 3. **授权闸门**：下载媒体时校验 `speaker.consentStatus` 与角色——
    `revoked` 仅 investigator/admin 可调档；`research`/`pending` 对教练与学员 403。
-4. **撤回/收窄即真正封口加密**（`ConsentEnforcementService`，不只是改数据库状态）：
-   - `POST /speakers/:id/revoke` 或授权范围收窄到 `research`、以及 **sync push** 推来
-     同类状态变化时，服务端把该说话人名下所有**明文**媒体读入 → AES-256-GCM
-     加密为 `<id>.<ext>.enc` → **删除明文文件**，素材置 `restricted/sensitive/keyVersion=1`；
-     接口返回 `_sealedFiles`（本次新加密文件数）；操作幂等，已加密素材跳过；
-   - 文件尚未上传时只封元数据，不会报错；事务提交后再做文件系统封口（避免脏读）；
-   - 重新授予 course/public 时元数据恢复可分发，文件**保留加密**（分发授权与静态
-     加密是两件事，下载时按 keyVersion 内存解密）；
-   - 种子数据中 research 范围的成都话同样以 `.wav.enc` 落盘，与待签/撤回素材一致。
+4. **撤回/收窄即真正封口加密**（`ConsentEnforcementService`，不只是改数据库状态）。
+   所有能改 `consentStatus/consentScope` 的写通道共用同一个纯函数判定
+   `consentTransition(before, after)`（`packages/shared/src/consent-transition.ts`），
+   不存在“某个接口忘记封口”：
+   - **通用 upsert**（`POST/PUT /speakers/:id`，现场建档/移动端编辑）、专门端点
+     `/speakers/:id/revoke`、`/speakers/:id/consent`，以及 **sync push** 推来的状态变化，
+     从可分发（granted+course/public）迁移到不可分发（revoked/pending/granted+research）
+     时，都把名下**明文**媒体读入 → AES-256-GCM 加密为 `<id>.<ext>.enc` →
+     **删除明文文件**，撤回/待签置 `restricted`（research 保留自身状态，分发由策略过滤）；
+     新建即不可分发时（先录音后补授权）同样封口；
+   - 操作幂等，已加密素材跳过；文件尚未上传时只封元数据；
+     sync 通道在事务提交后做文件封口（避免脏读），并用保存前快照判断状态变化；
+   - `/revoke` 接口返回 `_sealedFiles`（本次新加密文件数）；
+   - 迁移回 course/public 时元数据恢复可分发，文件**保留加密**（下载时按 keyVersion 内存解密）；
+   - 种子数据中 research 范围的成都话以 `.wav.enc` 落盘，与待签/撤回素材一致。
 5. **撤回联动**：撤回授权后名下素材在两端置 restricted；学员端列表和同步拉取都会过滤。
 6. **练习数据归属**：学员只能读写本人的跟读与收到的批注（见第六节「学员练习数据的归属与隔离」），
    归属以 JWT 登录身份为准，知道他人 attempt id 也无法覆盖录音或读到评语。
@@ -230,7 +236,7 @@ LWW 比较的才是真实编辑先后而非收货时间；仅当客户端缺时�
 ## 七、测试
 
 ```bash
-npm test   # shared 22 例 + api 34 例 + mobile 19 例，共 75 例
+npm test   # shared 28 例 + api 35 例 + mobile 19 例，共 82 例
 ```
 
 API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
@@ -242,7 +248,8 @@ API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
   DB 被直接写入穿越路径时读取守卫抛错；教练不能降级敏感素材；
 - 未来时间戳（2999 年）被钳制、全服游标不跳未来、持未来游标的设备下次同步自愈、
   毒记录之后的正常数据仍能用旧游标拉到、未来版无法在 LWW 中永远压过合法编辑；
-- 撤回/收窄授权把明文文件真正封口为 AES-GCM 密文并删除明文（REST 与 sync 双通道），
+- 撤回/收窄授权把明文文件真正封口为 AES-GCM 密文并删除明文；所有写通道（通用
+  upsert、/revoke、/consent、sync push）共用 consentTransition 判定，无一遗漏；
   调查员解密可读、学员/教练 403；重新授权后恢复可分发且文件保留加密；research 播种即加密。
 - 离线推送新建 → 拉取可见；旧基线推送产生 `version_conflict`；
 - 课程整课保存后移除条目被软删；

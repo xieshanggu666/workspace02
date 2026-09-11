@@ -202,6 +202,67 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
     expect(back.data.toString()).toBe('RIFF-sync-plain');
   });
 
+  it('【回归】通用 upsert 把授权改为 revoked/research 时，名下明文录音必须封口', async () => {
+    // course 授权说话人 + 明文素材
+    await speakers.upsert({
+      id: 's-upseal', code: 'UPSEAL', name: '通用更新封口', dialect: '粤语', region: '广州',
+      consentStatus: 'granted', consentScope: 'course', version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.upsert({
+      id: 'a-upseal', title: '明文素材', speakerId: 's-upseal', ownerId: 'u1', dialect: '粤语',
+      durationSec: 0.1, sampleRate: 16000, channels: 1, mime: 'audio/wav',
+      waveformPeaks: [0.2], syllables: [], status: 'annotated', sensitive: false,
+      recordedAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.attachFile('a-upseal', Buffer.from('RIFF-UPSERT-PLAIN'));
+    expect(existsSync(path.join(process.env.UPLOAD_DIR!, 'audio/a-upseal.wav'))).toBe(true);
+
+    // 攻击/误用：通过通用更新接口直接改成 revoked（绕过 /revoke 端点）
+    await speakers.upsert({
+      id: 's-upseal', code: 'UPSEAL', name: '通用更新封口', dialect: '粤语', region: '广州',
+      consentStatus: 'revoked', consentScope: null, version: 2, updatedAt: new Date().toISOString(),
+    } as any);
+
+    let row = await ds.getRepository(entities.AudioAsset).findOneBy({ id: 'a-upseal' });
+    expect(row!.filePath).toBe('audio/a-upseal.wav.enc');
+    expect(row!.keyVersion).toBe(1);
+    expect(existsSync(path.join(process.env.UPLOAD_DIR!, 'audio/a-upseal.wav'))).toBe(false);
+
+    // 同一通道把 scope 缩减为 research（先恢复到 course 再改 research）
+    await speakers.upsert({
+      id: 's-upseal', code: 'UPSEAL', name: '通用更新封口', dialect: '粤语', region: '广州',
+      consentStatus: 'granted', consentScope: 'course', version: 3, updatedAt: new Date().toISOString(),
+    } as any);
+    // 放一条新明文素材，验证 course→research 经通用接口也封口
+    await audio.upsert({
+      id: 'a-upseal2', title: '第二条明文', speakerId: 's-upseal', ownerId: 'u1', dialect: '粤语',
+      durationSec: 0.1, sampleRate: 16000, channels: 1, mime: 'audio/wav',
+      waveformPeaks: [0.2], syllables: [], status: 'annotated', sensitive: false,
+      recordedAt: new Date().toISOString(), version: 1, updatedAt: new Date().toISOString(),
+    } as any);
+    await audio.attachFile('a-upseal2', Buffer.from('RIFF-UPSERT2-PLAIN'));
+
+    await speakers.upsert({
+      id: 's-upseal', code: 'UPSEAL', name: '通用更新封口', dialect: '粤语', region: '广州',
+      consentStatus: 'granted', consentScope: 'research', version: 4, updatedAt: new Date().toISOString(),
+    } as any);
+
+    row = await ds.getRepository(entities.AudioAsset).findOneBy({ id: 'a-upseal2' });
+    expect(row!.filePath).toBe('audio/a-upseal2.wav.enc');
+    expect(row!.keyVersion).toBe(1);
+    // research 保留 annotated 状态（分发由授权策略过滤，不是 status）
+    expect(row!.status).toBe('annotated');
+    expect(existsSync(path.join(process.env.UPLOAD_DIR!, 'audio/a-upseal2.wav'))).toBe(false);
+
+    // 恢复 course：重新可分发（文件保留加密）
+    await speakers.upsert({
+      id: 's-upseal', code: 'UPSEAL', name: '通用更新封口', dialect: '粤语', region: '广州',
+      consentStatus: 'granted', consentScope: 'course', version: 5, updatedAt: new Date().toISOString(),
+    } as any);
+    const restored = await audio.readMedia('a-upseal2', 'student');
+    expect(restored.data.toString()).toBe('RIFF-UPSERT2-PLAIN');
+  });
+
   it('同步：推送新说话人 → 拉取可见；基于旧版本的二次推送产生冲突', async () => {
     const pushResult = await sync.push(
       {

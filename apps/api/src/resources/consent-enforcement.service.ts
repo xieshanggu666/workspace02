@@ -3,7 +3,6 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import { readFile, unlink, writeFile } from 'fs/promises';
-import * as path from 'path';
 import { AudioAsset, Speaker } from '../entities';
 import { MediaCryptoService } from '../media/media-crypto.service';
 import { resolveWithinStorage } from '../media/path-guard';
@@ -11,15 +10,18 @@ import { resolveWithinStorage } from '../media/path-guard';
 /**
  * 知情同意状态变化时的「封口加密」执行器。
  *
- * 承诺（App 与 README）：撤回授权或素材不可分发后，服务端磁盘上的录音必须
+ * 承诺（App 与 README）：撤回授权或素材不再可分发后，服务端磁盘上的录音必须
  * 立即加密，明文文件删除，而不仅仅是把数据库状态改掉、靠下载接口返回 403。
  *
- * 触发时机（幂等，可重复执行）：
- *  - REST: 撤回授权 POST /speakers/:id/revoke；
- *  - REST: 授权范围收窄到 research（非课程/公开分发）；
- *  - 同步：设备推送了新的 speakers 状态。
+ * 设计要点（两个正交的概念）：
+ *  - 是否可分发：由说话人 consentStatus/consentScope 决定（见 canAccessMedia），
+ *    与素材本身是否加密无关；
+ *  - 是否加密落盘：本服务负责。凡进入「不可分发」状态的素材，文件一律 AES-GCM 加密。
+ *  因此 research（仍保留 annotated 状态）与 revoked（应置 restricted）处理不同：
+ *    research：只加密文件，status 保持 annotated；
+ *    revoked / pending：加密文件并把 status 置为 restricted。
  *
- * 已经加密（keyVersion 非空）的素材跳过。
+ * 触发（幂等，可重复执行）：REST 通用 upsert、/revoke、/consent，以及 sync push。
  */
 @Injectable()
 export class ConsentEnforcementService {
@@ -53,20 +55,24 @@ export class ConsentEnforcementService {
     if (!speaker) return 0;
     if (this.isDistributable(speaker)) return 0;
 
+    // research（已授予但仅研究）保留原 status；其余不可分发状态置 restricted
+    const keepOwnStatus =
+      speaker.consentStatus === 'granted' && speaker.consentScope === 'research';
+
     const assets = await this.assets.find({
       where: { speakerId, deletedAt: IsNull() },
     });
 
     let sealed = 0;
     for (const asset of assets) {
-      // 元数据先封口：列表/同步立即不可见、不可被改成公开
       let changed = false;
-      if (!asset.sensitive) {
-        asset.sensitive = true;
+
+      if (!keepOwnStatus && asset.status !== 'restricted') {
+        asset.status = 'restricted';
         changed = true;
       }
-      if (asset.status !== 'restricted') {
-        asset.status = 'restricted';
+      if (!asset.sensitive) {
+        asset.sensitive = true;
         changed = true;
       }
 
@@ -84,9 +90,9 @@ export class ConsentEnforcementService {
           asset.keyVersion = keyVersion;
           sealed += 1;
           changed = true;
-          this.logger.warn(`说话人 ${speakerId} 撤回/收窄授权，素材 ${asset.id} 已封口加密`);
+          this.logger.warn(`说话人 ${speakerId} 授权不可分发，素材 ${asset.id} 已封口加密`);
         } catch (e) {
-          // 元数据可能已先到（文件尚未上传）：没有物理文件时只保留元数据封口
+          // 文件尚未上传时只封元数据
           const msg = e instanceof Error ? e.message : String(e);
           if (!/ENOENT|非法媒体路径/.test(msg)) throw e;
         }
@@ -101,15 +107,10 @@ export class ConsentEnforcementService {
     return sealed;
   }
 
-  /** 供同步引擎使用：拿到刚落库的说话人实体后按其状态封口 */
-  async enforceSpeakerEntity(speaker: Speaker): Promise<number> {
-    return this.sealSpeakerAssets(speaker.id);
-  }
-
   /**
    * 重新获得 course/public 授权后恢复可分发状态。
-   * 注意：已加密的文件【保留加密】（keyVersion 不清空、密文不解密回写），
-   * 分发授权与静态加密是两件事；下载时 readMedia 会按 keyVersion 内存解密。
+   * 已加密的文件【保留加密】（keyVersion 不清空），下载时按 keyVersion 内存解密；
+   * 仅把因撤回而置 restricted 的素材恢复为可展示状态。
    */
   async restoreSpeakerAssets(speakerId: string): Promise<number> {
     const assets = await this.assets.find({
@@ -118,7 +119,6 @@ export class ConsentEnforcementService {
     let changed = 0;
     for (const asset of assets) {
       if (asset.status === 'restricted') {
-        // 有标注的回 annotated，否则回 draft
         asset.status = asset.syllables?.length || asset.transcript ? 'annotated' : 'draft';
         asset.version += 1;
         asset.updatedAt = new Date() as any;
@@ -131,6 +131,6 @@ export class ConsentEnforcementService {
 
   /** 存储根目录（测试用） */
   storageRoot(): string {
-    return path.resolve(this.uploadDir);
+    return this.uploadDir;
   }
 }
