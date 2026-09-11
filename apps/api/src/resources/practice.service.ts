@@ -9,6 +9,7 @@ import * as path from 'path';
 import { PracticeAttempt, Annotation, AudioAsset, Speaker } from '../entities';
 import type { AnnotationDto, PracticeAttemptDto } from '@dialect/shared';
 import { MapperService } from './mapper.service';
+import { resolveWithinStorage } from '../media/path-guard';
 
 /** 学员练习提交 + 教练批注。学员的跟读录音也加密落盘（个人语音同样敏感）。 */
 @Injectable()
@@ -116,7 +117,7 @@ export class PracticeService implements OnModuleInit {
       : 'wav';
     const rel = `attempts/${a.id}.${ext}.enc`;
     const { encryptAttempt } = await import('./attempt-crypto');
-    await writeFile(path.join(this.uploadDir, rel), encryptAttempt(data, a.id));
+    await writeFile(resolveWithinStorage(this.uploadDir, rel), encryptAttempt(data, a.id));
     a.filePath = rel;
     a.mime = mime;
     a.version += 1;
@@ -135,7 +136,11 @@ export class PracticeService implements OnModuleInit {
     }
     if (!a.filePath) throw new NotFoundException('练习录音尚未上传');
     const { decryptAttempt } = await import('./attempt-crypto');
-    const data = decryptAttempt(await readFile(path.join(this.uploadDir, a.filePath)), a.id);
+    // 纵深防御：即使 filePath 被污染也只能落在 attempts/ 存储目录内
+    const data = decryptAttempt(
+      await readFile(resolveWithinStorage(this.uploadDir, a.filePath)),
+      a.id,
+    );
     return { mime: a.mime || 'audio/wav', data };
   }
 

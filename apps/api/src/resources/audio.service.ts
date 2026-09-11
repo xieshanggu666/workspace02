@@ -11,6 +11,7 @@ import type { AudioAssetDto, AppRole } from '@dialect/shared';
 import { canAccessMedia, mediaDenyReason } from '@dialect/shared';
 import { MapperService } from './mapper.service';
 import { MediaCryptoService } from '../media/media-crypto.service';
+import { resolveWithinStorage } from '../media/path-guard';
 import { SpeakersService } from './speakers.service';
 
 /**
@@ -83,17 +84,46 @@ export class AudioService implements OnModuleInit {
     return a;
   }
 
-  async getDto(id: string) {
-    return this.mapper.audio(await this.getEntity(id));
+  async getDto(id: string, role?: AppRole) {
+    const a = await this.getEntity(id);
+    if (role) {
+      const spk = await this.speakers.findOneBy({ id: a.speakerId });
+      if (!canAccessMedia(
+        { consentStatus: spk?.consentStatus, consentScope: spk?.consentScope, sensitive: a.sensitive },
+        role,
+      )) {
+        throw new ForbiddenException(
+          mediaDenyReason(
+            { consentStatus: spk?.consentStatus, consentScope: spk?.consentScope, sensitive: a.sensitive },
+            role,
+          ),
+        );
+      }
+    }
+    return this.mapper.audio(a);
   }
 
-  async upsert(dto: AudioAssetDto, deviceId?: string): Promise<AudioAsset> {
+  /**
+   * upsert 元数据。
+   * 安全：
+   *  - filePath / keyVersion 永远不接受客户端输入（只能由 attachFile 服务端生成），
+   *    否则可写入 ../../.env 之类路径，再经下载接口读取任意文件；
+   *  - 教练只能改标注层（转写/音节/状态流转），不能改归属、说话人、敏感标记；
+   *  - 任何人都不能通过编辑把受限素材自行降级为公开。
+   */
+  async upsert(
+    dto: AudioAssetDto,
+    deviceId?: string,
+    actor?: { role: AppRole; userId: string },
+  ): Promise<AudioAsset> {
     const existing = await this.repo.findOneBy({ id: dto.id });
+    // 缺省 actor 仅用于系统内部调用（同步引擎、种子、测试）；HTTP 入口必须显式传角色
+    const role: AppRole = actor?.role ?? 'investigator';
+    const isCoach = role === 'coach';
     const entity = existing ?? this.repo.create({ id: dto.id, recordedAt: new Date(dto.recordedAt) });
+
     Object.assign(entity, {
       title: dto.title,
-      speakerId: dto.speakerId,
-      ownerId: dto.ownerId,
       dialect: dto.dialect,
       durationSec: dto.durationSec,
       sampleRate: dto.sampleRate,
@@ -105,11 +135,34 @@ export class AudioService implements OnModuleInit {
       ipa: dto.ipa ?? null,
       syllables: dto.syllables ?? [],
       status: dto.status,
-      sensitive: dto.sensitive,
-      keyVersion: dto.keyVersion ?? null,
-      filePath: dto.filePath ?? entity.filePath ?? null,
       deviceId: deviceId ?? dto.deviceId ?? entity.deviceId,
     });
+
+    if (!isCoach) {
+      // 调查员/管理员可改归属与说话人
+      entity.speakerId = dto.speakerId;
+      entity.ownerId = dto.ownerId;
+    }
+
+    // sensitive 是安全字段：
+    //  - 教练：完全不可写，保留原值；
+    //  - staff（含系统内部调用）：只允许「升级为敏感」，不能把受限素材降级。
+    const staff = role === 'investigator' || role === 'admin';
+    if (isCoach) {
+      entity.sensitive = existing ? existing.sensitive : false;
+    } else if (staff) {
+      const nextSensitive = !!dto.sensitive;
+      if (existing?.sensitive && !nextSensitive) {
+        throw new ForbiddenException('不能将已标记为敏感的录音降级为公开');
+      }
+      entity.sensitive = nextSensitive;
+      if (nextSensitive) entity.keyVersion = Math.max(1, entity.keyVersion ?? 1);
+    }
+
+    // filePath / keyVersion 刻意不从 dto 读取：保持服务端既有值
+    entity.filePath = entity.filePath ?? null;
+    if (!entity.keyVersion) entity.keyVersion = null;
+
     entity.recordedAt = new Date(dto.recordedAt) as any;
     entity.version = existing ? existing.version + 1 : Math.max(1, dto.version);
     entity.updatedAt = new Date() as any;
@@ -125,7 +178,7 @@ export class AudioService implements OnModuleInit {
       : 'wav';
     const ext = keyVersion ? `${rawExt}.enc` : rawExt;
     const rel = `audio/${asset.id}.${ext}`;
-    await writeFile(path.join(this.uploadDir, rel), payload);
+    await writeFile(resolveWithinStorage(this.uploadDir, rel), payload);
     asset.filePath = rel;
     if (mime) asset.mime = mime;
     asset.keyVersion = keyVersion;
@@ -156,7 +209,9 @@ export class AudioService implements OnModuleInit {
     }
     if (!asset.filePath) throw new NotFoundException('媒体文件尚未上传');
 
-    const raw = await readFile(path.join(this.uploadDir, asset.filePath));
+    // 纵深防御：filePath 必须落在存储根目录、且符合服务端命名规则
+    const absPath = resolveWithinStorage(this.uploadDir, asset.filePath);
+    const raw = await readFile(absPath);
     const data = asset.keyVersion ? this.crypto.decrypt(raw, asset.id, asset.keyVersion) : raw;
     this.logger.log(`媒体读取 id=${id} role=${role} encrypted=${!!asset.keyVersion}`);
     return { mime: asset.mime, data };

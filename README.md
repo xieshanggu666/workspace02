@@ -119,6 +119,15 @@ npm start            # Expo Dev Server；模拟器按 i / a，真机装 Expo Go 
 6. **录音格式**：iOS 录 `LINEARPCM/wav`，Android 录 `AAC/m4a`；MIME 随元数据
    （`AudioAsset.mime` / `PracticeAttempt.mime`）贯穿同步、上传、落盘扩展名与下载
    `Content-Type`，播放器按真实格式解码，不会出现把 m4a 当 wav 或把密文当音频的问题。
+7. **存储路径不可被客户端控制（防任意文件读取）**：
+   - 媒体落盘路径（`audio/<id>.<wav|m4a>[.enc]`、`attempts/<id>.<wav|m4a>.enc`）
+     **永远只由服务端**的上传接口生成；`filePath`、`keyVersion` 不在元数据编辑接口
+     （`PUT /audio/:id`）和同步 push 白名单的可写字段里，教练/学员在请求体里携带的值一律忽略；
+   - 读取时再过一遍 `resolveWithinStorage()`：相对路径必须匹配严格白名单正则，
+     解析结果必须位于存储根目录内，`../../`、绝对路径、空字节等一律拒绝
+     （`apps/api/src/media/path-guard.ts`）——即使数据库被污染也读不到 uploads 之外的文件；
+   - `sensitive` 对教练只读（不可把受限录音自行降级为公开），staff 也只能升级不能降级。
+   这样持教练 token 无法借元数据编辑 + 下载接口读取 `.env`、源码或密钥文件。
 
 ## 六、同步协议（版本合并）
 
@@ -198,7 +207,7 @@ LWW 比较的才是真实编辑先后而非收货时间；仅当客户端缺时�
 ## 七、测试
 
 ```bash
-npm test   # shared 15 例 + api 22 例 + mobile 19 例，共 56 例
+npm test   # shared 15 例 + api 29 例 + mobile 19 例，共 63 例
 ```
 
 API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
@@ -206,6 +215,8 @@ API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
 - pending/revoked/research 授权下教练与学员读取媒体 403、调查员读到解密 RIFF；
 - research 素材在列表、同步、下载三通道对教练/学员不可见；
 - research 素材编入课程在 REST 与 sync 双通道 403；混合脏数据课程对学员过滤；
+- 教练注入 `filePath=../../.env`（相对/绝对路径）无法写库、下载仍返回原音频；
+  DB 被直接写入穿越路径时读取守卫抛错；教练不能降级敏感素材；
 - 离线推送新建 → 拉取可见；旧基线推送产生 `version_conflict`；
 - 课程整课保存后移除条目被软删；
 - 学员 A/B 互改 attempt、互传录音、互看批注、全量同步互相可见性全部按身份隔离；

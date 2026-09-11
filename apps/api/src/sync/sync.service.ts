@@ -56,10 +56,12 @@ export class SyncService {
         repo: ds.getRepository(AudioAsset),
         toDto: (e: AudioAsset) => this.mapper.audio(e),
         canPush: (r) => r === 'investigator' || r === 'coach' || r === 'admin',
+        // 注意：filePath / keyVersion 绝不在白名单内——它们只由服务端上传接口生成，
+        // 客户端推送无法借此植入路径穿越或篡改加密标记。
+        // sensitive / speakerId / ownerId 对教练只读（见 push 内按角色二次过滤）。
         fields: ['title', 'speakerId', 'ownerId', 'dialect', 'durationSec',
           'sampleRate', 'channels', 'mime', 'waveformPeaks', 'transcript', 'translation',
-          'ipa', 'syllables', 'status', 'sensitive', 'keyVersion', 'recordedAt'],
-        // filePath 仅由服务端上传接口写入，客户端本地 uri 不得覆盖
+          'ipa', 'syllables', 'status', 'sensitive', 'recordedAt'],
         dateFields: ['recordedAt'],
       },
       courses: {
@@ -225,6 +227,21 @@ export class SyncService {
               throw new ForbiddenException('不能修改其他学员的练习记录');
             }
             (clientEntity as any).studentId = userId; // 以登录身份为准
+          }
+
+          // 教练同步音频时：归属/敏感字段以服务端为准，且禁止把敏感降级
+          if (name === 'audio' && role === 'coach' && serverRow) {
+            (clientEntity as any).speakerId = serverRow.speakerId;
+            (clientEntity as any).ownerId = serverRow.ownerId;
+            if (serverRow.sensitive) {
+              (clientEntity as any).sensitive = true;
+              (clientEntity as any).status =
+                (clientEntity as any).status === 'restricted' ? 'restricted' : serverRow.status;
+            }
+          }
+          if (name === 'audio' && role !== 'investigator' && role !== 'admin' && serverRow) {
+            // 非 staff 永不允许翻 sensitive
+            if (serverRow.sensitive) (clientEntity as any).sensitive = true;
           }
 
           const serverDto = serverRow ? cfg.toDto(serverRow) : undefined;

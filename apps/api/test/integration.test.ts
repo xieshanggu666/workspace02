@@ -249,6 +249,11 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
     expect(stuPull.audio.some((x) => x.id === 'a6')).toBe(false);
     const staffPull = await sync.pull(undefined, 'investigator', 'u1');
     expect(staffPull.audio.some((x) => x.id === 'a6')).toBe(true);
+
+    // 单条元数据同样挡：教练/学员拿 research 素材详情返回 403
+    await expect(audio.getDto('a6', 'student')).rejects.toMatchObject({ status: 403 });
+    await expect(audio.getDto('a6', 'coach')).rejects.toMatchObject({ status: 403 });
+    expect((await audio.getDto('a6', 'investigator')).id).toBe('a6');
   });
 
   it('research 素材不能被编入课程（REST 与 sync push 双通道拒绝）', async () => {
@@ -322,6 +327,70 @@ describe('端到端（sql.js）：授权闸门 / 加密媒体 / 离线同步 / �
     const coachList = await courses.list(true, 'coach');
     const coachMixed = coachList.find((c) => c.id === 'c-mixed');
     expect(coachMixed?.items.length).toBe(2);
+  });
+
+  // ============ 路径穿越 / 密钥文件读取防护 ============
+
+  it('教练不能通过 PUT 元数据注入 filePath 读取 .env / 源码 / 密钥', async () => {
+    // a4 是 course 授权的合规素材，教练可读
+    await audio.attachFile('a4', Buffer.from('RIFF-legit-course-audio'));
+
+    // 攻击 1：教练直接调用 upsert 时携带 filePath（模拟 PUT /audio/a4 body）
+    await audio.upsert(
+      {
+        ...(await audio.getDto('a4')),
+        filePath: '../../.env',
+        keyVersion: null,
+      },
+      'dev-coach',
+      { role: 'coach', userId: 'coach1' },
+    );
+    let entity = await audio.getEntity('a4');
+    // filePath 不被客户端输入改写
+    expect(entity.filePath).toMatch(/^audio\/a4\.(wav|m4a)$/);
+    expect(entity.keyVersion).toBeNull(); // 本来就是非敏感
+    // 读出来仍然是原始录音，而不是 .env
+    expect((await audio.readMedia('a4', 'coach')).data.toString()).toBe('RIFF-legit-course-audio');
+
+    // 攻击 2：尝试绝对路径 /etc/passwd
+    await audio.upsert(
+      { ...(await audio.getDto('a4')), filePath: '/etc/passwd', keyVersion: null },
+      'dev-coach',
+      { role: 'coach', userId: 'coach1' },
+    );
+    entity = await audio.getEntity('a4');
+    expect(entity.filePath).toMatch(/^audio\//);
+    await expect(
+      audio.readMedia({} as any, 'coach'),
+    ).rejects.toBeTruthy();
+
+    // 攻击 3：教练试图把素材改成非敏感再换路径
+    await audio.upsert(
+      { ...(await audio.getDto('a4')), sensitive: false, filePath: 'attempts/../../package.json' },
+      'dev-coach',
+      { role: 'coach', userId: 'coach1' },
+    );
+    entity = await audio.getEntity('a4');
+    expect(entity.filePath).toMatch(/^audio\//);
+  });
+
+  it('即使 DB 里被直接写入穿越路径，读取守卫也拒绝越界', async () => {
+    // 模拟最极端情况：绕过应用层直接改库
+    await ds.getRepository(entities.AudioAsset).update('a4', {
+      filePath: '../../../../../../etc/passwd',
+      keyVersion: null,
+    } as any);
+    await expect(audio.readMedia('a4', 'investigator')).rejects.toThrow(/非法媒体路径|媒体路径越界/);
+  });
+
+  it('教练不能把已受限素材降级为公开', async () => {
+    // a1 是 sensitive/restricted；教练显式以 coach 身份尝试降级
+    const res = await audio.upsert(
+      { ...(await audio.getDto('a1')), sensitive: false, status: 'published' },
+      'dev-coach',
+      { role: 'coach', userId: 'coach1' },
+    );
+    expect(res.sensitive).toBe(true);
   });
 
   // ================= 学员练习隐私与越权防护 =================

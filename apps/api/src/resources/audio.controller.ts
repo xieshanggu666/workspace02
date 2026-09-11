@@ -36,27 +36,31 @@ export class AudioController {
   }
 
   @Get(':id')
-  async get(@Param('id') id: string) {
-    return this.mapper.audio(await this.service.getEntity(id));
+  async get(@Param('id') id: string, @Req() req: { user: JwtPayload }) {
+    // 单条元数据同样执行同意范围闸门（research 对教练/学员不可见）
+    return this.service.getDto(id, req.user.role);
   }
 
   @Post()
   @Roles('investigator', 'admin')
   async create(@Body() dto: AudioAssetDto, @Req() req: { user: JwtPayload }) {
-    return this.mapper.audio(await this.service.upsert(dto, req.user.deviceId));
+    return this.mapper.audio(
+      await this.service.upsert(dto, req.user.deviceId, { role: req.user.role, userId: req.user.sub }),
+    );
   }
 
   @Put(':id')
   @Roles('investigator', 'coach', 'admin')
   async update(@Param('id') id: string, @Body() dto: AudioAssetDto, @Req() req: { user: JwtPayload }) {
-    // 教练只允许改标注层（音节/转写/状态），所有权字段不可改
-    if (req.user.role === 'coach') {
-      const existing = await this.service.getEntity(id);
-      dto.ownerId = existing.ownerId;
-      dto.speakerId = existing.speakerId;
-      dto.sensitive = existing.sensitive;
-    }
-    return this.mapper.audio(await this.service.upsert({ ...dto, id }, req.user.deviceId));
+    // 可写字段的角色边界由 service.upsert 统一强制执行
+    // （教练只能改标注层；filePath/keyVersion 任何客户端都不可写）
+    return this.mapper.audio(
+      await this.service.upsert(
+        { ...dto, id },
+        req.user.deviceId,
+        { role: req.user.role, userId: req.user.sub },
+      ),
+    );
   }
 
   @Delete(':id')
