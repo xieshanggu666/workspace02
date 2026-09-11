@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "方言田野工作站",
+    "slug": "dialect-fieldwork",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#1f3a5f"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "需要使用麦克风进行方言录音与学员跟读练习。",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "permissions": ["RECORD_AUDIO"]
+    },
+    "plugins": ["expo-secure-store"],
+    "extra": {
+      "apiBase": "http://127.0.0.1:3000/api"
+    }
+  }
+}

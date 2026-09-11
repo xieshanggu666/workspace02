@@ -1,0 +1,158 @@
+# 方言田野工作站（Dialect Fieldwork）
+
+面向**方言调查员 / 语言教练**的离线优先手机端工具：现场录音 → 说话人授权 →
+波形音节标注 → 说话人绑定 → 编排跟读课 → 学员跟读 → 教练批注，全程支持离线采集与版本合并。
+
+## 功能与技术映射
+
+| 需求 | 实现 |
+|---|---|
+| 录音采集 | `apps/mobile/src/screens/RecorderScreen.tsx` + `src/recorder.ts`（expo-av，录音时实时电平采样成波形峰值） |
+| 说话人授权 | `Speaker` 实体 + `consentStatus(granted/pending/revoked)` + 协议 `consentHash(sha256)`；App 内电子签署 / 撤回；撤回即封口 |
+| 音频波形标注 / 切分音节 | `apps/mobile/src/ui/Waveform.tsx`（点波形落边界，两点成一音节，逐音节填转写/对译/IPA） |
+| 绑定说话人 | 每条 `AudioAsset.speakerId`；按说话人详情页采集 |
+| 课程编排 | `CourseEditorScreen`：从素材挑句、排序、跟读次数、教练提示 |
+| 学员练习 | `CourseDetailScreen`：听原音 → 录音跟读（本地加密）→ 提交 attempt |
+| 教练批注 | 按时间点（秒）在学员跟读波形上加 annotation |
+| 离线同步 | outbox + 游标增量；`packages/shared/src/merge.ts` 三向版本合并（fast-forward / LWW / 冲突） |
+| 敏感录音保护 | 端侧 AES-256（主密钥 Keychain/Keystore）+ 服务端 AES-256-GCM 一录一密落盘 + 读取时角色/授权闸门 |
+
+## 仓库结构
+
+```
+packages/shared/      前后端共享：DTO、方言示例元数据、版本合并纯函数（含 vitest）
+apps/api/             NestJS + TypeORM + MySQL（无 MySQL 时可用 sql.js 演示 profile）
+apps/mobile/          Expo(React Native) + TypeScript + Zustand + TanStack Query
+docker-compose.yml    一键 MySQL 8（root / zhongxin123，库 dialect）
+```
+
+## 一、启动后端
+
+### 方式 A：Docker MySQL（推荐，正式栈）
+
+```bash
+cp .env.example .env          # 已按 root/zhongxin123 预填
+docker compose up -d mysql    # 等待 healthy
+npm install                   # 根目录一次装齐三个 workspace
+npm run build:shared
+npm run seed                  # 建表 + 演示账号 + 6 条方言示例 + 示例跟读课
+npm run dev:api               # http://127.0.0.1:3000/api
+```
+
+> 不用 Docker 时，在本机 MySQL 里执行
+> `CREATE DATABASE dialect CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`
+> TypeORM `synchronize=true` 会自动建表。连接配置全部在 `.env`：
+> `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME`。
+
+### 方式 B：无 MySQL 的演示模式（sql.js 本地文件，零外部依赖）
+
+```bash
+npm install && npm run build:shared
+cd apps/api
+DB_TYPE=sqlite npm run seed --silent 2>/dev/null || DB_TYPE=sqlite npx ts-node --transpile-only src/seeds/run-seed.ts
+DB_TYPE=sqlite npm run start:dev
+```
+
+数据落在 `apps/api/dialect-demo.sqlite`，上传/加密文件落在 `apps/api/uploads/`。
+
+健康检查：`GET http://127.0.0.1:3000/api/health`
+
+## 二、演示账号（密码统一 `demo1234`）
+
+| 用户名 | 角色 | 能做什么 |
+|---|---|---|
+| `investigator1` | 调查员 | 建档、授权、采集、标注、同步说话人/音频 |
+| `coach1` | 教练 | 编排发布课程、批注学员跟读 |
+| `student1` | 学员 | 看已发布课程、听原音、录音跟读 |
+| `admin` | 管理员 | 全部 |
+
+## 三、方言示例数据（6 组，由 seed 程序化生成可播放 WAV）
+
+| 方言 | 句子 / IPA | 说话人授权 | 素材状态 |
+|---|---|---|---|
+| 粤语-广州话 | 你好吗？ `nei˨˧ hou˧˥ maː˧` | granted(course) | published |
+| 西南官话-成都话 | 我是成都人 `ŋo˨˩ sɿ˥˧ tsʰən˨˩tu˨˩ nən˨˩˧` | granted(research) | annotated |
+| 吴语-苏州话 | 侬吃饭了啊？ `noŋ˨˧ tsʰi˥˩ ve˨˧˩ tsi˥˨ a˧` | granted(public) | published |
+| 闽南语-厦门话 | 今仔日天气好 `ka˧˨ a˥˥ lit˩ sĩ˧˧ kʰi˥˩ ho˥˧` | granted(course) | published |
+| 客家语-梅州话 | 我爱食白糖糕 `ŋai˩ oi˥˧ sit˩ pak̚˩ tʰɔŋ˩ kau˧` | **pending（待签）** | **restricted，AES-GCM 加密** |
+| 湘语-长沙话 | 锁在哪里？ `so˧˩ tei˧˩ na˧˧ li˧˩` | **revoked（已撤回）** | **restricted，禁止分发** |
+
+完整字段（含逐音节起止秒、波形峰值、采样率、授权哈希等）在
+`packages/shared/src/samples.ts`，可被前后端直接引用；WAV 由
+`apps/api/src/seeds/generate-wavs.ts` 按音节时间轴合成，无需携带二进制。
+
+示例跟读课《南方方言入门 · 第1课》编排了前 4 句（每句跟读 3 遍 + 教练提示）。
+
+## 四、启动手机端
+
+```bash
+cd apps/mobile
+npm start            # Expo Dev Server；模拟器按 i / a，真机装 Expo Go 扫码
+```
+
+- **Android 模拟器**：API 地址保持默认 `http://10.0.2.2:3000/api`
+  （模拟器内 10.0.2.2 指向宿主机；当前默认值是 127.0.0.1，请在 App「同步」页改成 10.0.2.2）。
+- **iOS 模拟器**：`http://127.0.0.1:3000/api` 直连。
+- **真机**：在「同步」页填电脑局域网 IP，如 `http://192.168.1.10:3000/api`。
+
+离线流程：断网也可以建档、授权、连续录音（录完即本地加密）、标注、编课、跟读；
+所有变更进 outbox。联网后在「同步」页一键 **推送元数据 → 补传录音 → 增量拉取**；
+分叉时弹出冲突卡片，可选「采用服务端」或「强制保留本机」。
+
+## 五、安全模型
+
+1. **端侧**：录音停止瞬间用 AES-256-CBC（PBKDF2 10k 轮、每文件独立盐/IV）加密，
+   明文文件立即删除；主密钥存 expo-secure-store（Keychain / Keystore）。
+2. **服务端静态加密**：`sensitive=true` 或授权未完成/已撤回的录音以
+   AES-256-GCM 落盘（`uploads/audio/*.wav.enc`），密钥 =
+   `SHA256(主密钥 || "media:v1:" || assetId)`，一录一密、可轮换；GCM 标签防篡改。
+3. **授权闸门**：下载媒体时校验 `speaker.consentStatus` 与角色——
+   `revoked` 仅 investigator/admin 可调档；`pending`/sensitive 对学员 403。
+4. **撤回联动**：撤回授权后名下素材在两端置 restricted；学员端列表和同步拉取都会过滤。
+
+## 六、同步协议（版本合并）
+
+所有实体带 `id(客户端 UUID) / version / deviceId / updatedAt / deletedAt(软删墓碑)`。
+
+- `GET /api/sync/pull?cursor=<ISO>`：返回 `updatedAt > cursor` 的全部实体（含墓碑）。
+- `POST /api/sync/push`：单事务内逐条走 `mergeRecord`：
+  - `baseVersion == server.version` → 快进，version+1（无内容变化则不提版本）；
+  - `baseVersion < server.version`（两端都改）→ 比较 `updatedAt`，新者胜（LWW），
+    旧者返回 `version_conflict`；
+  - 服务端已删 → `deleted` 冲突，普通同步不能复活。
+- 推送按角色限制（学员不能推 speakers/课程，教练不能推 speakers 等）。
+
+## 七、测试
+
+```bash
+npm test                 # shared 合并算法 8 例 + api 12 例（加密/WAV/授权闸门/同步E2E/课程对账）
+```
+
+API 测试使用临时 sql.js 库，无需 MySQL。关键用例：
+- AES-GCM 往返、篡改密文被认证标签识破、错误 assetId 无法解密；
+- pending/revoked 授权下学员读取媒体 403、调查员读到解密 RIFF；
+- 离线推送新建 → 拉取可见；旧基线推送产生 `version_conflict`；
+- 课程整课保存后移除条目被软删。
+
+## 八、主要 HTTP 接口（均需 `Authorization: Bearer <token>`，前缀 /api）
+
+```
+POST /auth/login                 GET /auth/me
+GET/POST/PUT/DELETE /speakers[/:id]      POST /speakers/:id/consent | /revoke
+GET/POST/PUT/DELETE /audio[/:id]
+POST /audio/:id/file (multipart)         GET  /audio/:id/file   (按授权解密)
+GET/POST/PUT/DELETE /courses             POST /courses/:id/publish
+POST /practice/attempts                  POST /practice/attempts/:id/file
+GET  /practice/attempts                  POST /practice/attempts/:id/annotations
+GET  /sync/pull?cursor=ISO               POST /sync/push
+```
+
+快速手测：
+
+```bash
+TOKEN=$(curl -s -X POST localhost:3000/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"username":"student1","password":"demo1234"}' | jq -r .token)
+curl -s localhost:3000/api/audio -H "Authorization: Bearer $TOKEN" | jq 'length'   # 4（受限2条被过滤）
+curl -s -o /dev/null -w '%{http_code}\n' \
+  localhost:3000/api/audio/aud-hsn-changsha-locked/file -H "Authorization: Bearer $TOKEN"  # 403
+```

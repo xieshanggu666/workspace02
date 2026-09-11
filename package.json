@@ -1,0 +1,26 @@
+{
+  "name": "dialect-fieldwork",
+  "version": "1.0.0",
+  "private": true,
+  "description": "方言田野调查与跟读课平台 (NestJS + Expo RN monorepo)",
+  "workspaces": [
+    "packages/shared",
+    "apps/api",
+    "apps/mobile"
+  ],
+  "scripts": {
+    "build:shared": "npm run build -w @dialect/shared",
+    "build:api": "npm run build -w @dialect/api",
+    "dev:api": "npm run start:dev -w @dialect/api",
+    "seed": "npm run seed -w @dialect/api",
+    "test": "npm run test -w @dialect/shared && npm run test -w @dialect/api",
+    "mobile": "npm run start -w @dialect/mobile",
+    "db:up": "docker compose up -d mysql",
+    "db:logs": "docker compose logs -f mysql",
+    "dev:api:sqlite": "DB_TYPE=sqlite npm run start:dev -w @dialect/api",
+    "seed:sqlite": "DB_TYPE=sqlite npm run seed -w @dialect/api"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

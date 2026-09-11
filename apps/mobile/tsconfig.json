@@ -1,0 +1,10 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "@dialect/shared": ["../../packages/shared/src"]
+    }
+  },
+  "include": ["src", "index.js", "App.tsx"]
+}

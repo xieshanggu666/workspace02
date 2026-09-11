@@ -1,0 +1,21 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: dialect-mysql
+    restart: unless-stopped
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: zhongxin123
+      MYSQL_DATABASE: dialect
+    ports:
+      - "3306:3306"
+    volumes:
+      - dialect_mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot", "--password=zhongxin123"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  dialect_mysql:

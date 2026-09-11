@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+.env
+apps/api/uploads/
+apps/api/*.sqlite
+.DS_Store
+.expo/
+coverage/
